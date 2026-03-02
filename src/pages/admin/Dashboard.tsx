@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { supabase } from '../../lib/supabase';
-import { Package, Truck, ClipboardList } from 'lucide-react';
+import { Package, Truck, ClipboardList, Trash2, AlertTriangle } from 'lucide-react';
 
 interface InventorySummary {
   warehouseName: string;
@@ -19,6 +19,8 @@ export default function Dashboard() {
   const [inventories, setInventories] = useState<InventorySummary[]>([]);
   const [activeOrders, setActiveOrders] = useState<ActiveOrder[]>([]);
   const [loading, setLoading] = useState(true);
+  const [confirmId, setConfirmId] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   useEffect(() => {
     loadData();
@@ -64,6 +66,29 @@ export default function Dashboard() {
     }
 
     setLoading(false);
+  };
+
+  const handleDelete = async (workOrderId: string) => {
+    setDeleting(true);
+    try {
+      // 1. daily_marking 삭제
+      const { data: lines } = await supabase
+        .from('work_order_line')
+        .select('id')
+        .eq('work_order_id', workOrderId);
+      const lineIds = (lines || []).map((l: any) => l.id);
+      if (lineIds.length > 0) {
+        await supabase.from('daily_marking').delete().in('work_order_line_id', lineIds);
+      }
+      // 2. work_order_line 삭제
+      await supabase.from('work_order_line').delete().eq('work_order_id', workOrderId);
+      // 3. work_order 삭제
+      await supabase.from('work_order').delete().eq('id', workOrderId);
+      await loadData();
+    } finally {
+      setDeleting(false);
+      setConfirmId(null);
+    }
   };
 
   const statusColor: Record<string, string> = {
@@ -139,24 +164,73 @@ export default function Dashboard() {
                   <th className="text-left px-4 py-3 font-medium text-gray-600">다운로드 날짜</th>
                   <th className="text-left px-4 py-3 font-medium text-gray-600">라인 수</th>
                   <th className="text-left px-4 py-3 font-medium text-gray-600">상태</th>
+                  <th className="px-4 py-3" />
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-50">
-                {activeOrders.map((wo) => (
-                  <tr key={wo.id} className="hover:bg-gray-50">
-                    <td className="px-4 py-3 text-gray-900">{wo.downloadDate}</td>
-                    <td className="px-4 py-3 text-gray-600">{wo.lineCount}건</td>
-                    <td className="px-4 py-3">
-                      <span
-                        className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${
-                          statusColor[wo.status] || 'bg-gray-100 text-gray-700'
-                        }`}
-                      >
-                        {wo.status}
-                      </span>
-                    </td>
-                  </tr>
-                ))}
+                {activeOrders.map((wo) =>
+                  confirmId === wo.id ? (
+                    <tr key={wo.id} className="bg-red-50">
+                      <td colSpan={4} className="px-4 py-3">
+                        <div className="flex items-center gap-3">
+                          <AlertTriangle size={15} className="text-red-500 flex-shrink-0" />
+                          <span className="text-sm text-red-800">
+                            <span className="font-semibold">{wo.downloadDate}</span>
+                            {' '}작업지시서를 삭제할까요?{' '}
+                            <span
+                              className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${
+                                statusColor[wo.status] || 'bg-gray-100 text-gray-700'
+                              }`}
+                            >
+                              현재 상태: {wo.status}
+                            </span>
+                            {' '}— 연관 데이터가 모두 삭제됩니다.
+                          </span>
+                          <div className="ml-auto flex items-center gap-2">
+                            <button
+                              onClick={() => setConfirmId(null)}
+                              disabled={deleting}
+                              className="px-3 py-1 text-xs text-gray-600 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 disabled:opacity-50"
+                            >
+                              취소
+                            </button>
+                            <button
+                              onClick={() => handleDelete(wo.id)}
+                              disabled={deleting}
+                              className="px-3 py-1 text-xs text-white bg-red-600 rounded-lg hover:bg-red-700 disabled:opacity-50 flex items-center gap-1"
+                            >
+                              <Trash2 size={12} />
+                              {deleting ? '삭제 중...' : '삭제'}
+                            </button>
+                          </div>
+                        </div>
+                      </td>
+                    </tr>
+                  ) : (
+                    <tr key={wo.id} className="hover:bg-gray-50">
+                      <td className="px-4 py-3 text-gray-900">{wo.downloadDate}</td>
+                      <td className="px-4 py-3 text-gray-600">{wo.lineCount}건</td>
+                      <td className="px-4 py-3">
+                        <span
+                          className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${
+                            statusColor[wo.status] || 'bg-gray-100 text-gray-700'
+                          }`}
+                        >
+                          {wo.status}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3 text-right">
+                        <button
+                          onClick={() => setConfirmId(wo.id)}
+                          className="p-1.5 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors"
+                          title="삭제"
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      </td>
+                    </tr>
+                  )
+                )}
               </tbody>
             </table>
           </div>

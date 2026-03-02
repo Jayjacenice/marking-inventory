@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { supabase } from '../../lib/supabase';
-import { parseBomExcel } from '../../lib/excelParser';
-import { Upload, Database, Trash2, AlertTriangle, CheckCircle } from 'lucide-react';
+import { parseBomExcel, parseBerrizBomExcel, type RawBomRow } from '../../lib/excelParser';
+import { Upload, Database, Trash2, AlertTriangle, CheckCircle, FileSpreadsheet } from 'lucide-react';
 
 interface BomEntry {
   id: string;
@@ -12,11 +12,16 @@ interface BomEntry {
   quantity: number;
 }
 
+type UploadMode = 'berriz' | 'manual';
+
 export default function BOMManage() {
   const [boms, setBoms] = useState<BomEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
+  const [progress, setProgress] = useState<{ current: number; total: number; step: string } | null>(null);
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const [mode, setMode] = useState<UploadMode>('berriz');
+  const [isDragging, setIsDragging] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -35,48 +40,86 @@ export default function BOMManage() {
     setLoading(false);
   };
 
-  const handleBomUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    setUploading(true);
-    setMessage(null);
+  const uploadBomRows = async (rows: RawBomRow[]) => {
+    // SKU 등록 (완제품 + 단품) — 500개씩 배치
+    const allSkus = [
+      ...rows.map((r) => ({ sku_id: r.finishedSkuId, sku_name: r.finishedSkuName, barcode: null, type: '완제품' })),
+      ...rows.map((r) => ({
+        sku_id: r.componentSkuId,
+        sku_name: r.componentSkuName,
+        barcode: null,
+        type: r.componentSkuName.includes('마킹') ? '마킹단품' : '유니폼단품',
+      })),
+    ];
+    const uniqueSkus = Array.from(new Map(allSkus.map((s) => [s.sku_id, s])).values());
 
-    try {
-      const rows = await parseBomExcel(file);
+    const SKU_BATCH = 500;
+    const skuBatchCount = Math.ceil(uniqueSkus.length / SKU_BATCH);
+    for (let i = 0; i < uniqueSkus.length; i += SKU_BATCH) {
+      const batchNum = Math.floor(i / SKU_BATCH) + 1;
+      setProgress({ current: batchNum, total: skuBatchCount, step: `SKU 등록 중 (${i + 1}~${Math.min(i + SKU_BATCH, uniqueSkus.length)} / ${uniqueSkus.length})` });
+      await supabase
+        .from('sku')
+        .upsert(uniqueSkus.slice(i, i + SKU_BATCH), { onConflict: 'sku_id', ignoreDuplicates: true });
+    }
 
-      // SKU 등록 (완제품 + 단품)
-      const allSkus = [
-        ...rows.map((r) => ({ sku_id: r.finishedSkuId, sku_name: r.finishedSkuName, barcode: null, type: '완제품' })),
-        ...rows.map((r) => ({
-          sku_id: r.componentSkuId,
-          sku_name: r.componentSkuName,
-          barcode: null,
-          type: r.componentSkuName.includes('마킹') ? '마킹단품' : '유니폼단품',
-        })),
-      ];
+    // BOM 등록 — 500개씩 배치
+    const bomRows = rows.map((r) => ({
+      finished_sku_id: r.finishedSkuId,
+      component_sku_id: r.componentSkuId,
+      quantity: r.quantity,
+    }));
 
-      await supabase.from('sku').upsert(allSkus, { onConflict: 'sku_id', ignoreDuplicates: true });
-
-      // BOM 등록
-      const bomRows = rows.map((r) => ({
-        finished_sku_id: r.finishedSkuId,
-        component_sku_id: r.componentSkuId,
-        quantity: r.quantity,
-      }));
-
+    const BOM_BATCH = 500;
+    const bomBatchCount = Math.ceil(bomRows.length / BOM_BATCH);
+    for (let i = 0; i < bomRows.length; i += BOM_BATCH) {
+      const batchNum = Math.floor(i / BOM_BATCH) + 1;
+      setProgress({ current: batchNum, total: bomBatchCount, step: `BOM 등록 중 (${i + 1}~${Math.min(i + BOM_BATCH, bomRows.length)} / ${bomRows.length})` });
       const { error } = await supabase
         .from('bom')
-        .upsert(bomRows, { onConflict: 'finished_sku_id,component_sku_id' });
-
+        .upsert(bomRows.slice(i, i + BOM_BATCH), { onConflict: 'finished_sku_id,component_sku_id' });
       if (error) throw error;
+    }
 
-      setMessage({ type: 'success', text: `BOM ${rows.length}건이 등록되었습니다.` });
+    return rows.length;
+  };
+
+  const processFile = async (file: File) => {
+    setUploading(true);
+    setMessage(null);
+    setProgress(null);
+
+    try {
+      setProgress({ current: 0, total: 1, step: '엑셀 파일 파싱 중...' });
+      const rows = mode === 'berriz'
+        ? await parseBerrizBomExcel(file, (p) => setProgress(p))
+        : await parseBomExcel(file, (p) => setProgress(p));
+      const count = await uploadBomRows(rows);
+      setMessage({ type: 'success', text: `완료! BOM ${count}건 (SKU 포함) 등록되었습니다.` });
       loadBoms();
     } catch (err: any) {
       setMessage({ type: 'error', text: err.message || 'BOM 업로드 중 오류가 발생했습니다.' });
     } finally {
       setUploading(false);
+      setProgress(null);
       if (fileInputRef.current) fileInputRef.current.value = '';
+    }
+  };
+
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    await processFile(file);
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragging(false);
+    const file = e.dataTransfer.files?.[0];
+    if (file && (file.name.endsWith('.xlsx') || file.name.endsWith('.xls'))) {
+      processFile(file);
+    } else {
+      setMessage({ type: 'error', text: '.xlsx 또는 .xls 파일만 업로드 가능합니다.' });
     }
   };
 
@@ -109,23 +152,74 @@ export default function BOMManage() {
           ref={fileInputRef}
           type="file"
           accept=".xlsx,.xls"
-          onChange={handleBomUpload}
+          onChange={handleFileUpload}
           className="hidden"
         />
       </div>
 
-      {/* BOM 엑셀 양식 안내 */}
-      <div className="bg-blue-50 border border-blue-200 rounded-xl p-4">
-        <h3 className="text-sm font-semibold text-blue-900 mb-2">BOM 엑셀 파일 양식</h3>
-        <p className="text-xs text-blue-700 mb-1">
-          헤더 행 포함, 다음 컬럼 순서로 작성하세요:
+      {/* 업로드 모드 선택 */}
+      <div className="bg-white rounded-xl border border-gray-200 p-4 space-y-3">
+        <p className="text-sm font-semibold text-gray-700">업로드 양식 선택</p>
+        <div className="grid grid-cols-2 gap-3">
+          <button
+            onClick={() => setMode('berriz')}
+            className={`p-3 rounded-lg border-2 text-left transition-colors ${
+              mode === 'berriz'
+                ? 'border-blue-500 bg-blue-50'
+                : 'border-gray-200 hover:border-gray-300'
+            }`}
+          >
+            <p className={`text-sm font-medium ${mode === 'berriz' ? 'text-blue-700' : 'text-gray-700'}`}>
+              BERRIZ SKU 업로드 양식
+            </p>
+            <p className="text-xs text-gray-500 mt-0.5">
+              sku_excel_upload_template.xlsx
+            </p>
+            <p className="text-xs text-gray-400 mt-1">
+              컬럼[5] SKU코드 · 컬럼[18] BOM구성
+            </p>
+          </button>
+          <button
+            onClick={() => setMode('manual')}
+            className={`p-3 rounded-lg border-2 text-left transition-colors ${
+              mode === 'manual'
+                ? 'border-blue-500 bg-blue-50'
+                : 'border-gray-200 hover:border-gray-300'
+            }`}
+          >
+            <p className={`text-sm font-medium ${mode === 'manual' ? 'text-blue-700' : 'text-gray-700'}`}>
+              수동 5컬럼 양식
+            </p>
+            <p className="text-xs text-gray-500 mt-0.5">직접 작성한 BOM 파일</p>
+            <p className="text-xs text-gray-400 mt-1">
+              완제품ID · 완제품명 · 단품ID · 단품명 · 수량
+            </p>
+          </button>
+        </div>
+        {mode === 'berriz' && (
+          <p className="text-xs text-blue-600 bg-blue-50 rounded px-3 py-2">
+            BERRIZ에서 다운로드한 SKU 업로드 양식 파일을 그대로 업로드하세요. 2,000개 이상도 자동 배치 처리됩니다.
+          </p>
+        )}
+      </div>
+
+      {/* 드래그앤드롭 업로드 영역 */}
+      <div
+        className={`border-2 border-dashed rounded-xl p-8 text-center cursor-pointer transition-colors ${
+          isDragging
+            ? 'border-blue-500 bg-blue-100'
+            : 'border-gray-300 hover:border-blue-400 hover:bg-blue-50'
+        }`}
+        onClick={() => fileInputRef.current?.click()}
+        onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
+        onDragLeave={() => setIsDragging(false)}
+        onDrop={handleDrop}
+      >
+        <FileSpreadsheet size={32} className={`mx-auto mb-2 ${isDragging ? 'text-blue-500' : 'text-gray-400'}`} />
+        <p className={`text-sm font-medium ${isDragging ? 'text-blue-700' : 'text-gray-600'}`}>
+          {isDragging ? '여기에 파일을 놓으세요' : 'BOM 엑셀 파일을 선택하거나 드래그하세요'}
         </p>
-        <code className="text-xs text-blue-800 bg-blue-100 px-2 py-1 rounded">
-          완제품 SKU ID | 완제품 SKU명 | 단품 SKU ID | 단품 SKU명 | 수량
-        </code>
-        <p className="text-xs text-blue-600 mt-2">
-          예: 완제품 1개에 유니폼 1개 + 마킹 1개가 필요하면 2행으로 작성
-        </p>
+        <p className="text-xs text-gray-400 mt-1">.xlsx, .xls 파일 지원</p>
       </div>
 
       {message && (
@@ -141,55 +235,83 @@ export default function BOMManage() {
         </div>
       )}
 
+      {uploading && (
+        <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 space-y-3">
+          <p className="text-sm text-blue-700 font-medium text-center">
+            {progress?.step ?? 'BOM 데이터를 등록하는 중입니다...'}
+          </p>
+          {progress && (
+            <>
+              <div className="w-full bg-blue-200 rounded-full h-2.5 overflow-hidden">
+                <div
+                  className="bg-blue-600 h-2.5 rounded-full transition-all duration-300"
+                  style={{ width: `${Math.round((progress.current / progress.total) * 100)}%` }}
+                />
+              </div>
+              <p className="text-xs text-blue-500 text-center">
+                {progress.current} / {progress.total} 배치 완료
+                ({Math.round((progress.current / progress.total) * 100)}%)
+              </p>
+            </>
+          )}
+        </div>
+      )}
+
       {loading ? (
         <div className="text-center text-gray-400 py-8">불러오는 중...</div>
       ) : Object.keys(grouped).length === 0 ? (
         <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-12 text-center">
           <Database size={40} className="mx-auto text-gray-300 mb-3" />
           <p className="text-gray-500">등록된 BOM이 없습니다.</p>
-          <p className="text-sm text-gray-400 mt-1">BOM 엑셀 파일을 업로드하세요.</p>
+          <p className="text-sm text-gray-400 mt-1">BERRIZ SKU 업로드 양식 파일을 업로드하세요.</p>
         </div>
       ) : (
-        <div className="space-y-3">
-          {Object.entries(grouped).map(([finishedSkuId, items]) => (
-            <div
-              key={finishedSkuId}
-              className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden"
-            >
-              <div className="px-4 py-3 bg-gray-50 border-b border-gray-100">
-                <p className="font-medium text-gray-900 text-sm">
-                  {items[0].finished_sku?.sku_name || finishedSkuId}
-                </p>
-                <p className="text-xs text-gray-500 font-mono">{finishedSkuId}</p>
+        <>
+          <p className="text-sm text-gray-500">
+            완제품 <span className="font-semibold text-gray-800">{Object.keys(grouped).length}</span>종 ·
+            BOM 엔트리 <span className="font-semibold text-gray-800">{boms.length}</span>건
+          </p>
+          <div className="space-y-3">
+            {Object.entries(grouped).map(([finishedSkuId, items]) => (
+              <div
+                key={finishedSkuId}
+                className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden"
+              >
+                <div className="px-4 py-3 bg-gray-50 border-b border-gray-100">
+                  <p className="font-medium text-gray-900 text-sm">
+                    {items[0].finished_sku?.sku_name || finishedSkuId}
+                  </p>
+                  <p className="text-xs text-gray-500 font-mono">{finishedSkuId}</p>
+                </div>
+                <table className="w-full text-sm">
+                  <tbody>
+                    {items.map((bom) => (
+                      <tr key={bom.id} className="border-b border-gray-50 last:border-0 hover:bg-gray-50">
+                        <td className="px-4 py-2.5 text-gray-700">
+                          {bom.component?.sku_name || bom.component_sku_id}
+                        </td>
+                        <td className="px-4 py-2.5 text-gray-400 font-mono text-xs">
+                          {bom.component_sku_id}
+                        </td>
+                        <td className="px-4 py-2.5 text-gray-900 font-medium text-right">
+                          ×{bom.quantity}
+                        </td>
+                        <td className="px-4 py-2.5 text-right">
+                          <button
+                            onClick={() => handleDelete(bom.id)}
+                            className="text-gray-400 hover:text-red-500 transition-colors"
+                          >
+                            <Trash2 size={14} />
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
               </div>
-              <table className="w-full text-sm">
-                <tbody>
-                  {items.map((bom) => (
-                    <tr key={bom.id} className="border-b border-gray-50 last:border-0 hover:bg-gray-50">
-                      <td className="px-4 py-2.5 text-gray-700">
-                        {bom.component?.sku_name || bom.component_sku_id}
-                      </td>
-                      <td className="px-4 py-2.5 text-gray-400 font-mono text-xs">
-                        {bom.component_sku_id}
-                      </td>
-                      <td className="px-4 py-2.5 text-gray-900 font-medium text-right">
-                        ×{bom.quantity}
-                      </td>
-                      <td className="px-4 py-2.5 text-right">
-                        <button
-                          onClick={() => handleDelete(bom.id)}
-                          className="text-gray-400 hover:text-red-500 transition-colors"
-                        >
-                          <Trash2 size={14} />
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          ))}
-        </div>
+            ))}
+          </div>
+        </>
       )}
     </div>
   );

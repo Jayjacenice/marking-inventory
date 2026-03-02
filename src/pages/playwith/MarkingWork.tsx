@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { supabase } from '../../lib/supabase';
-import { CheckCircle, Clock } from 'lucide-react';
+import { AlertTriangle, CheckCircle, Clock } from 'lucide-react';
 
 interface MarkingItem {
   lineId: string;
@@ -22,7 +22,9 @@ export default function MarkingWork() {
   const [items, setItems] = useState<MarkingItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [saveProgress, setSaveProgress] = useState<{ current: number; total: number; step: string } | null>(null);
   const [saved, setSaved] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const today = new Date().toISOString().split('T')[0];
 
   useEffect(() => {
@@ -31,54 +33,68 @@ export default function MarkingWork() {
 
   const loadOrders = async () => {
     setLoading(true);
-    const { data } = await supabase
-      .from('work_order')
-      .select('id, download_date')
-      .in('status', ['입고확인완료', '마킹중'])
-      .order('uploaded_at', { ascending: false });
-    const list = (data || []) as ActiveOrder[];
-    setOrders(list);
-    if (list.length > 0) selectOrder(list[0]);
-    else setLoading(false);
+    setError(null);
+    try {
+      const { data, error: err } = await supabase
+        .from('work_order')
+        .select('id, download_date')
+        .in('status', ['입고확인완료', '마킹중'])
+        .order('uploaded_at', { ascending: false });
+      if (err) throw err;
+      const list = (data || []) as ActiveOrder[];
+      setOrders(list);
+      if (list.length > 0) selectOrder(list[0]);
+      else setLoading(false);
+    } catch (e: any) {
+      setError(`데이터 조회 실패: ${e.message || '알 수 없는 오류'}`);
+      setLoading(false);
+    }
   };
 
   const selectOrder = async (wo: ActiveOrder) => {
     setSelectedOrder(wo);
     setLoading(true);
     setSaved(false);
+    setError(null);
+    try {
+      // 마킹이 필요한 라인만 조회
+      const { data: lines, error: linesErr } = await supabase
+        .from('work_order_line')
+        .select('id, finished_sku_id, received_qty, marked_qty, finished_sku:sku!work_order_line_finished_sku_id_fkey(sku_name)')
+        .eq('work_order_id', wo.id)
+        .eq('needs_marking', true);
+      if (linesErr) throw linesErr;
 
-    // 마킹이 필요한 라인만 조회
-    const { data: lines } = await supabase
-      .from('work_order_line')
-      .select('id, finished_sku_id, received_qty, marked_qty, finished_sku:sku!work_order_line_finished_sku_id_fkey(sku_name)')
-      .eq('work_order_id', wo.id)
-      .eq('needs_marking', true);
+      // 오늘 이미 입력된 마킹 수량 조회
+      const { data: todayMarkings, error: markingErr } = await supabase
+        .from('daily_marking')
+        .select('work_order_line_id, completed_qty')
+        .eq('date', today)
+        .in('work_order_line_id', (lines || []).map((l: any) => l.id));
+      if (markingErr) throw markingErr;
 
-    // 오늘 이미 입력된 마킹 수량 조회
-    const { data: todayMarkings } = await supabase
-      .from('daily_marking')
-      .select('work_order_line_id, completed_qty')
-      .eq('date', today)
-      .in('work_order_line_id', (lines || []).map((l: any) => l.id));
+      const todayMap: Record<string, number> = {};
+      for (const m of (todayMarkings || []) as any[]) {
+        todayMap[m.work_order_line_id] = m.completed_qty;
+      }
 
-    const todayMap: Record<string, number> = {};
-    for (const m of (todayMarkings || []) as any[]) {
-      todayMap[m.work_order_line_id] = m.completed_qty;
+      const markingItems: MarkingItem[] = ((lines || []) as any[])
+        .filter((line) => line.received_qty - line.marked_qty > 0)
+        .map((line) => ({
+          lineId: line.id,
+          finishedSkuId: line.finished_sku_id,
+          skuName: line.finished_sku?.sku_name || line.finished_sku_id,
+          remainingQty: line.received_qty - line.marked_qty,
+          todayQty: todayMap[line.id] || 0,
+          markedQty: line.marked_qty,
+        }));
+
+      setItems(markingItems);
+    } catch (e: any) {
+      setError(`마킹 데이터 조회 실패: ${e.message || '알 수 없는 오류'}`);
+    } finally {
+      setLoading(false);
     }
-
-    const markingItems: MarkingItem[] = ((lines || []) as any[])
-      .filter((line) => line.received_qty - line.marked_qty > 0)
-      .map((line) => ({
-        lineId: line.id,
-        finishedSkuId: line.finished_sku_id,
-        skuName: line.finished_sku?.sku_name || line.finished_sku_id,
-        remainingQty: line.received_qty - line.marked_qty,
-        todayQty: todayMap[line.id] || 0,
-        markedQty: line.marked_qty,
-      }));
-
-    setItems(markingItems);
-    setLoading(false);
   };
 
   const handleQtyChange = (lineId: string, value: number) => {
@@ -97,57 +113,87 @@ export default function MarkingWork() {
   const handleSave = async () => {
     if (!selectedOrder) return;
     setSaving(true);
+    setSaveProgress(null);
+    setError(null);
+    try {
+      const activeItems = items.filter((item) => item.todayQty > 0);
+      const total = activeItems.length + 1;
+      let processed = 0;
 
-    for (const item of items) {
-      if (item.todayQty === 0) continue;
+      for (const item of activeItems) {
+        processed++;
+        setSaveProgress({ current: processed, total, step: `마킹 기록 저장 중... (${processed} / ${activeItems.length})` });
 
-      // daily_marking 기록
-      const { data: existing } = await supabase
-        .from('daily_marking')
-        .select('id, completed_qty')
-        .eq('date', today)
-        .eq('work_order_line_id', item.lineId)
-        .single();
-
-      if (existing) {
-        await supabase
+        // daily_marking 기록 (오늘 기존 기록 확인)
+        const { data: existing, error: existingErr } = await supabase
           .from('daily_marking')
-          .update({ completed_qty: item.todayQty, sent_to_cj_qty: item.todayQty })
-          .eq('id', existing.id);
-      } else {
-        await supabase.from('daily_marking').insert({
-          date: today,
-          work_order_line_id: item.lineId,
-          completed_qty: item.todayQty,
-          sent_to_cj_qty: item.todayQty,
-        });
+          .select('id, completed_qty')
+          .eq('date', today)
+          .eq('work_order_line_id', item.lineId)
+          .maybeSingle();
+        if (existingErr) throw existingErr;
+
+        const previousQty = existing?.completed_qty || 0;
+        const diff = item.todayQty - previousQty; // 실제 증가분
+
+        if (existing) {
+          const { error: updateErr } = await supabase
+            .from('daily_marking')
+            .update({ completed_qty: item.todayQty, sent_to_cj_qty: item.todayQty })
+            .eq('id', existing.id);
+          if (updateErr) throw updateErr;
+        } else {
+          const { error: insertErr } = await supabase.from('daily_marking').insert({
+            date: today,
+            work_order_line_id: item.lineId,
+            completed_qty: item.todayQty,
+            sent_to_cj_qty: item.todayQty,
+          });
+          if (insertErr) throw insertErr;
+        }
+
+        // work_order_line marked_qty 업데이트 (DB에서 현재값을 다시 읽어 동시성 문제 방지)
+        const { data: currentLine, error: lineReadErr } = await supabase
+          .from('work_order_line')
+          .select('marked_qty')
+          .eq('id', item.lineId)
+          .maybeSingle();
+        if (lineReadErr) throw lineReadErr;
+
+        const currentMarkedQty = currentLine?.marked_qty || 0;
+        const { error: lineUpdateErr } = await supabase
+          .from('work_order_line')
+          .update({ marked_qty: currentMarkedQty + diff })
+          .eq('id', item.lineId);
+        if (lineUpdateErr) throw lineUpdateErr;
       }
 
-      // work_order_line marked_qty 업데이트
-      await supabase
+      // 모두 완료됐으면 상태 업데이트
+      setSaveProgress({ current: total, total, step: '완료 상태 업데이트 중...' });
+      const { data: allLines, error: allLinesErr } = await supabase
         .from('work_order_line')
-        .update({ marked_qty: item.markedQty + item.todayQty })
-        .eq('id', item.lineId);
+        .select('received_qty, marked_qty')
+        .eq('work_order_id', selectedOrder.id)
+        .eq('needs_marking', true);
+      if (allLinesErr) throw allLinesErr;
+
+      const allDone = ((allLines || []) as any[]).every(
+        (l) => l.marked_qty >= l.received_qty
+      );
+
+      const { error: statusErr } = await supabase
+        .from('work_order')
+        .update({ status: allDone ? '마킹완료' : '마킹중' })
+        .eq('id', selectedOrder.id);
+      if (statusErr) throw statusErr;
+
+      setSaved(true);
+    } catch (e: any) {
+      setError(`마킹 저장 실패: ${e.message || '알 수 없는 오류'}. 잠시 후 다시 시도해주세요.`);
+    } finally {
+      setSaving(false);
+      setSaveProgress(null);
     }
-
-    // 모두 완료됐으면 상태 업데이트
-    const { data: allLines } = await supabase
-      .from('work_order_line')
-      .select('received_qty, marked_qty')
-      .eq('work_order_id', selectedOrder.id)
-      .eq('needs_marking', true);
-
-    const allDone = ((allLines || []) as any[]).every(
-      (l) => l.marked_qty >= l.received_qty
-    );
-
-    await supabase
-      .from('work_order')
-      .update({ status: allDone ? '마킹완료' : '마킹중' })
-      .eq('id', selectedOrder.id);
-
-    setSaving(false);
-    setSaved(true);
   };
 
   if (loading) {
@@ -167,6 +213,15 @@ export default function MarkingWork() {
 
   return (
     <div className="space-y-5 max-w-lg">
+      {error && (
+        <div className="flex items-start gap-2 bg-red-50 border border-red-200 rounded-xl p-3">
+          <AlertTriangle size={16} className="text-red-600 flex-shrink-0 mt-0.5" />
+          <div>
+            <p className="text-sm text-red-800">{error}</p>
+            <button onClick={loadOrders} className="text-xs text-red-600 underline mt-1">다시 시도</button>
+          </div>
+        </div>
+      )}
       <div className="flex items-center justify-between">
         <h2 className="text-xl font-bold text-gray-900">마킹 작업</h2>
         <span className="text-sm text-gray-500">{today}</span>
@@ -269,6 +324,27 @@ export default function MarkingWork() {
               <p className="text-xs text-center text-gray-400">
                 미완료 수량은 내일 자동으로 남습니다
               </p>
+              {saving && (
+                <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 space-y-3">
+                  <p className="text-sm text-blue-700 font-medium text-center">
+                    {saveProgress?.step ?? '저장 중...'}
+                  </p>
+                  {saveProgress && (
+                    <>
+                      <div className="w-full bg-blue-200 rounded-full h-2.5 overflow-hidden">
+                        <div
+                          className="bg-blue-600 h-2.5 rounded-full transition-all duration-300"
+                          style={{ width: `${Math.round((saveProgress.current / saveProgress.total) * 100)}%` }}
+                        />
+                      </div>
+                      <p className="text-xs text-blue-500 text-center">
+                        {saveProgress.current} / {saveProgress.total}
+                        ({Math.round((saveProgress.current / saveProgress.total) * 100)}%)
+                      </p>
+                    </>
+                  )}
+                </div>
+              )}
               <button
                 onClick={handleSave}
                 disabled={saving || totalToday === 0}

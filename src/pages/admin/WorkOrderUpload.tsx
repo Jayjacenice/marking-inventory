@@ -13,31 +13,27 @@ interface ParseResult {
 
 export default function WorkOrderUpload() {
   const [parsing, setParsing] = useState(false);
+  const [parseProgress, setParseProgress] = useState<{ current: number; total: number; step: string } | null>(null);
   const [saving, setSaving] = useState(false);
+  const [saveProgress, setSaveProgress] = useState<{ current: number; total: number; step: string } | null>(null);
   const [result, setResult] = useState<ParseResult | null>(null);
   const [error, setError] = useState('');
   const [savedWorkOrderId, setSavedWorkOrderId] = useState<string | null>(null);
+  const [isDragging, setIsDragging] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const navigate = useNavigate();
 
-  const handleFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+  const processFile = async (file: File) => {
     setParsing(true);
+    setParseProgress(null);
     setError('');
     setResult(null);
     setSavedWorkOrderId(null);
 
     try {
-      const parsed = await parseWorkOrderExcel(file);
+      const parsed = await parseWorkOrderExcel(file, setParseProgress);
 
-      // BOM DB에서 완제품 SKU ID 목록 조회
-      const { data: bomData } = await supabase
-        .from('bom')
-        .select('finished_sku_id');
-
-      const markingSkuIds = new Set((bomData || []).map((b: any) => b.finished_sku_id));
-
+      const markingSkuIds = new Set(parsed.markingSkuCodes);
       const markingLines = parsed.lines.filter((l) => markingSkuIds.has(l.skuId));
       const nonMarkingLines = parsed.lines.filter((l) => !markingSkuIds.has(l.skuId));
 
@@ -51,16 +47,36 @@ export default function WorkOrderUpload() {
       setError(err.message || '파일 파싱 중 오류가 발생했습니다.');
     } finally {
       setParsing(false);
+      setParseProgress(null);
+    }
+  };
+
+  const handleFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    await processFile(file);
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragging(false);
+    const file = e.dataTransfer.files?.[0];
+    if (file && (file.name.endsWith('.xlsx') || file.name.endsWith('.xls'))) {
+      processFile(file);
+    } else {
+      setError('.xlsx 또는 .xls 파일만 업로드 가능합니다.');
     }
   };
 
   const handleSave = async () => {
     if (!result) return;
     setSaving(true);
+    setSaveProgress(null);
     setError('');
 
     try {
       // 1. 작업지시서 생성
+      setSaveProgress({ current: 1, total: 4, step: '작업지시서 생성 중...' });
       const { data: wo, error: woErr } = await supabase
         .from('work_order')
         .insert({ download_date: result.downloadDate, status: '업로드됨' })
@@ -70,6 +86,7 @@ export default function WorkOrderUpload() {
       if (woErr) throw woErr;
 
       // 2. SKU 자동 등록 (없는 경우)
+      setSaveProgress({ current: 2, total: 4, step: `SKU 등록 중... (${result.lines.length}건)` });
       const skuUpserts = result.lines.map((l) => ({
         sku_id: l.skuId,
         sku_name: l.skuName,
@@ -80,6 +97,7 @@ export default function WorkOrderUpload() {
       await supabase.from('sku').upsert(skuUpserts, { onConflict: 'sku_id', ignoreDuplicates: true });
 
       // 3. 작업지시서 라인 생성
+      setSaveProgress({ current: 3, total: 4, step: `라인 등록 중... (${result.lines.length}건)` });
       const markingSkuIdSet = new Set(result.markingLines.map((l) => l.skuId));
       const lines = result.lines.map((l) => ({
         work_order_id: wo.id,
@@ -95,6 +113,7 @@ export default function WorkOrderUpload() {
       if (lineErr) throw lineErr;
 
       // 4. 상태 업데이트
+      setSaveProgress({ current: 4, total: 4, step: '상태 업데이트 중...' });
       await supabase
         .from('work_order')
         .update({ status: '이관준비' })
@@ -105,6 +124,7 @@ export default function WorkOrderUpload() {
       setError(err.message || '저장 중 오류가 발생했습니다.');
     } finally {
       setSaving(false);
+      setSaveProgress(null);
     }
   };
 
@@ -112,13 +132,22 @@ export default function WorkOrderUpload() {
     <div className="space-y-6 max-w-3xl">
       <h2 className="text-xl font-bold text-gray-900">작업지시서 업로드</h2>
 
-      {/* 파일 업로드 영역 */}
+      {/* 파일 업로드 영역 (클릭 + 드래그앤드롭) */}
       <div
-        className="border-2 border-dashed border-gray-300 rounded-xl p-10 text-center cursor-pointer hover:border-blue-400 hover:bg-blue-50 transition-colors"
+        className={`border-2 border-dashed rounded-xl p-10 text-center cursor-pointer transition-colors ${
+          isDragging
+            ? 'border-blue-500 bg-blue-100'
+            : 'border-gray-300 hover:border-blue-400 hover:bg-blue-50'
+        }`}
         onClick={() => fileInputRef.current?.click()}
+        onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
+        onDragLeave={() => setIsDragging(false)}
+        onDrop={handleDrop}
       >
-        <FileSpreadsheet size={40} className="mx-auto text-gray-400 mb-3" />
-        <p className="text-gray-600 font-medium">BERRIZ 작업지시서 엑셀 파일을 선택하세요</p>
+        <FileSpreadsheet size={40} className={`mx-auto mb-3 ${isDragging ? 'text-blue-500' : 'text-gray-400'}`} />
+        <p className={`font-medium ${isDragging ? 'text-blue-700' : 'text-gray-600'}`}>
+          {isDragging ? '여기에 파일을 놓으세요' : 'BERRIZ 작업지시서 엑셀 파일을 선택하거나 드래그하세요'}
+        </p>
         <p className="text-sm text-gray-400 mt-1">
           WorkOrder_YYYYMMDD-YYYYMMDD_YYYYMMDDHHII.xlsx
         </p>
@@ -132,7 +161,25 @@ export default function WorkOrderUpload() {
       </div>
 
       {parsing && (
-        <div className="text-center text-gray-500 py-4">파일 분석 중...</div>
+        <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 space-y-3">
+          <p className="text-sm text-blue-700 font-medium text-center">
+            {parseProgress?.step ?? '파일 분석 중...'}
+          </p>
+          {parseProgress && (
+            <>
+              <div className="w-full bg-blue-200 rounded-full h-2.5 overflow-hidden">
+                <div
+                  className="bg-blue-600 h-2.5 rounded-full transition-all duration-300"
+                  style={{ width: `${Math.round((parseProgress.current / parseProgress.total) * 100)}%` }}
+                />
+              </div>
+              <p className="text-xs text-blue-500 text-center">
+                {parseProgress.current} / {parseProgress.total} 단계
+                ({Math.round((parseProgress.current / parseProgress.total) * 100)}%)
+              </p>
+            </>
+          )}
+        </div>
       )}
 
       {error && (
@@ -198,6 +245,27 @@ export default function WorkOrderUpload() {
             </div>
           </div>
 
+          {saving && (
+            <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 space-y-3">
+              <p className="text-sm text-blue-700 font-medium text-center">
+                {saveProgress?.step ?? '저장 중...'}
+              </p>
+              {saveProgress && (
+                <>
+                  <div className="w-full bg-blue-200 rounded-full h-2.5 overflow-hidden">
+                    <div
+                      className="bg-blue-600 h-2.5 rounded-full transition-all duration-300"
+                      style={{ width: `${Math.round((saveProgress.current / saveProgress.total) * 100)}%` }}
+                    />
+                  </div>
+                  <p className="text-xs text-blue-500 text-center">
+                    {saveProgress.current} / {saveProgress.total} 단계 완료
+                    ({Math.round((saveProgress.current / saveProgress.total) * 100)}%)
+                  </p>
+                </>
+              )}
+            </div>
+          )}
           <button
             onClick={handleSave}
             disabled={saving}

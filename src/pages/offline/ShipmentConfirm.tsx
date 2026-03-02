@@ -23,7 +23,9 @@ export default function ShipmentConfirm() {
   const [items, setItems] = useState<ShipmentItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [confirming, setConfirming] = useState(false);
+  const [confirmProgress, setConfirmProgress] = useState<{ current: number; total: number; step: string } | null>(null);
   const [confirmed, setConfirmed] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     loadPendingOrders();
@@ -31,16 +33,23 @@ export default function ShipmentConfirm() {
 
   const loadPendingOrders = async () => {
     setLoading(true);
-    const { data } = await supabase
-      .from('work_order')
-      .select('id, download_date')
-      .eq('status', '이관준비')
-      .order('uploaded_at', { ascending: false });
-    const orders = (data || []) as ActiveWorkOrder[];
-    setWorkOrders(orders);
-    if (orders.length > 0) {
-      selectOrder(orders[0]);
-    } else {
+    setError(null);
+    try {
+      const { data, error: err } = await supabase
+        .from('work_order')
+        .select('id, download_date')
+        .eq('status', '이관준비')
+        .order('uploaded_at', { ascending: false });
+      if (err) throw err;
+      const orders = (data || []) as ActiveWorkOrder[];
+      setWorkOrders(orders);
+      if (orders.length > 0) {
+        selectOrder(orders[0]);
+      } else {
+        setLoading(false);
+      }
+    } catch (e: any) {
+      setError(`데이터 조회 실패: ${e.message || '알 수 없는 오류'}`);
       setLoading(false);
     }
   };
@@ -49,111 +58,166 @@ export default function ShipmentConfirm() {
     setSelectedWo(wo);
     setLoading(true);
     setConfirmed(false);
+    setError(null);
+    try {
+      // 작업지시서 라인 + 오프라인샵 재고 조회
+      const { data: lines, error: linesErr } = await supabase
+        .from('work_order_line')
+        .select('id, finished_sku_id, ordered_qty, needs_marking, finished_sku:sku!work_order_line_finished_sku_id_fkey(sku_name)')
+        .eq('work_order_id', wo.id);
+      if (linesErr) throw linesErr;
 
-    // 작업지시서 라인 + 오프라인샵 재고 조회
-    const { data: lines } = await supabase
-      .from('work_order_line')
-      .select('id, finished_sku_id, ordered_qty, needs_marking, finished_sku:sku!work_order_line_finished_sku_id_fkey(sku_name)')
-      .eq('work_order_id', wo.id);
+      const { data: warehouses, error: warehouseErr } = await supabase
+        .from('warehouse')
+        .select('id')
+        .eq('name', '오프라인샵')
+        .maybeSingle();
+      if (warehouseErr) throw warehouseErr;
 
-    const { data: warehouses } = await supabase
-      .from('warehouse')
-      .select('id')
-      .eq('name', '오프라인샵')
-      .single();
+      const offlineWarehouseId = (warehouses as any)?.id;
 
-    const offlineWarehouseId = (warehouses as any)?.id;
+      // BOM 기반으로 오프라인샵에서 필요한 단품 수량 계산
+      const { data: bomData, error: bomErr } = await supabase
+        .from('bom')
+        .select('finished_sku_id, component_sku_id, quantity, component:sku!bom_component_sku_id_fkey(sku_id, sku_name)');
+      if (bomErr) throw bomErr;
 
-    // BOM 기반으로 오프라인샵에서 필요한 단품 수량 계산
-    const { data: bomData } = await supabase
-      .from('bom')
-      .select('finished_sku_id, component_sku_id, quantity, component:sku!bom_component_sku_id_fkey(sku_id, sku_name)');
+      // 오프라인샵 재고 조회
+      const { data: inventoryData, error: invErr } = await supabase
+        .from('inventory')
+        .select('sku_id, quantity')
+        .eq('warehouse_id', offlineWarehouseId);
+      if (invErr) throw invErr;
 
-    // 오프라인샵 재고 조회
-    const { data: inventoryData } = await supabase
-      .from('inventory')
-      .select('sku_id, quantity')
-      .eq('warehouse_id', offlineWarehouseId);
-
-    const inventoryMap: Record<string, number> = {};
-    for (const inv of (inventoryData || []) as any[]) {
-      inventoryMap[inv.sku_id] = inv.quantity;
-    }
-
-    // 단품 단위로 집계
-    const componentMap: Record<
-      string,
-      { lineId: string; skuId: string; skuName: string; needed: number; isMarking: boolean }
-    > = {};
-
-    for (const line of (lines || []) as any[]) {
-      if (line.needs_marking) {
-        const boms = (bomData || []).filter((b: any) => b.finished_sku_id === line.finished_sku_id);
-        for (const bom of boms as any[]) {
-          const key = bom.component_sku_id;
-          if (!componentMap[key]) {
-            componentMap[key] = {
-              lineId: line.id,
-              skuId: bom.component_sku_id,
-              skuName: bom.component?.sku_name || bom.component_sku_id,
-              needed: 0,
-              isMarking: bom.component?.sku_name?.includes('마킹') || false,
-            };
-          }
-          componentMap[key].needed += bom.quantity * line.ordered_qty;
-        }
-      } else {
-        const key = line.finished_sku_id;
-        componentMap[key] = {
-          lineId: line.id,
-          skuId: line.finished_sku_id,
-          skuName: line.finished_sku?.sku_name || line.finished_sku_id,
-          needed: line.ordered_qty,
-          isMarking: false,
-        };
+      const inventoryMap: Record<string, number> = {};
+      for (const inv of (inventoryData || []) as any[]) {
+        inventoryMap[inv.sku_id] = inv.quantity;
       }
+
+      // 단품 단위로 집계
+      const componentMap: Record<
+        string,
+        { lineId: string; skuId: string; skuName: string; needed: number; isMarking: boolean }
+      > = {};
+
+      for (const line of (lines || []) as any[]) {
+        if (line.needs_marking) {
+          const boms = (bomData || []).filter((b: any) => b.finished_sku_id === line.finished_sku_id);
+          for (const bom of boms as any[]) {
+            const key = bom.component_sku_id;
+            if (!componentMap[key]) {
+              componentMap[key] = {
+                lineId: line.id,
+                skuId: bom.component_sku_id,
+                skuName: bom.component?.sku_name || bom.component_sku_id,
+                needed: 0,
+                isMarking: bom.component?.sku_name?.includes('마킹') || false,
+              };
+            }
+            componentMap[key].needed += bom.quantity * line.ordered_qty;
+          }
+        } else {
+          const key = line.finished_sku_id;
+          componentMap[key] = {
+            lineId: line.id,
+            skuId: line.finished_sku_id,
+            skuName: line.finished_sku?.sku_name || line.finished_sku_id,
+            needed: line.ordered_qty,
+            isMarking: false,
+          };
+        }
+      }
+
+      const shipmentItems: ShipmentItem[] = Object.values(componentMap).map((c) => ({
+        lineId: c.lineId,
+        skuId: c.skuId,
+        skuName: c.skuName,
+        orderedQty: c.needed,
+        inventoryQty: inventoryMap[c.skuId] || 0,
+        isShortage: (inventoryMap[c.skuId] || 0) < c.needed,
+        isMarking: c.isMarking,
+      }));
+
+      setItems(shipmentItems);
+    } catch (e: any) {
+      setError(`발주 데이터 조회 실패: ${e.message || '알 수 없는 오류'}`);
+    } finally {
+      setLoading(false);
     }
-
-    const shipmentItems: ShipmentItem[] = Object.values(componentMap).map((c) => ({
-      lineId: c.lineId,
-      skuId: c.skuId,
-      skuName: c.skuName,
-      orderedQty: c.needed,
-      inventoryQty: inventoryMap[c.skuId] || 0,
-      isShortage: (inventoryMap[c.skuId] || 0) < c.needed,
-      isMarking: c.isMarking,
-    }));
-
-    setItems(shipmentItems);
-    setLoading(false);
   };
 
   const handleConfirm = async () => {
     if (!selectedWo) return;
     setConfirming(true);
+    setConfirmProgress(null);
+    setError(null);
+    try {
+      // 상태를 '이관중'으로 변경
+      setConfirmProgress({ current: 1, total: 2, step: '발송 상태 업데이트 중...' });
+      const { error: statusErr } = await supabase
+        .from('work_order')
+        .update({ status: '이관중' })
+        .eq('id', selectedWo.id);
+      if (statusErr) throw statusErr;
 
-    // 상태를 '이관중'으로 변경
-    await supabase
-      .from('work_order')
-      .update({ status: '이관중' })
-      .eq('id', selectedWo.id);
-
-    // 라인의 sent_qty를 ordered_qty로 업데이트
-    const { data: lines } = await supabase
-      .from('work_order_line')
-      .select('id, ordered_qty')
-      .eq('work_order_id', selectedWo.id);
-
-    for (const line of (lines || []) as any[]) {
-      await supabase
+      // 라인의 sent_qty를 ordered_qty로 업데이트
+      const { data: lines, error: linesErr } = await supabase
         .from('work_order_line')
-        .update({ sent_qty: line.ordered_qty })
-        .eq('id', line.id);
-    }
+        .select('id, ordered_qty')
+        .eq('work_order_id', selectedWo.id);
+      if (linesErr) throw linesErr;
 
-    setConfirming(false);
-    setConfirmed(true);
-    loadPendingOrders();
+      const lineCount = (lines || []).length;
+      const totalSteps = lineCount + items.length + 1;
+      let step = 1;
+
+      for (let i = 0; i < (lines || []).length; i++) {
+        const line = (lines as any[])[i];
+        setConfirmProgress({ current: step, total: totalSteps, step: `라인 처리 중... (${i + 1} / ${lineCount})` });
+        await supabase
+          .from('work_order_line')
+          .update({ sent_qty: line.ordered_qty })
+          .eq('id', line.id);
+        step++;
+      }
+
+      // 오프라인샵 재고 차감
+      const { data: warehouse } = await supabase
+        .from('warehouse')
+        .select('id')
+        .eq('name', '오프라인샵')
+        .maybeSingle();
+
+      if (warehouse) {
+        for (let i = 0; i < items.length; i++) {
+          const item = items[i];
+          setConfirmProgress({ current: step, total: totalSteps, step: `재고 차감 중... (${i + 1} / ${items.length})` });
+
+          const { data: inv } = await supabase
+            .from('inventory')
+            .select('id, quantity')
+            .eq('warehouse_id', warehouse.id)
+            .eq('sku_id', item.skuId)
+            .maybeSingle();
+
+          if (inv) {
+            await supabase
+              .from('inventory')
+              .update({ quantity: Math.max(0, inv.quantity - item.orderedQty) })
+              .eq('id', inv.id);
+          }
+          step++;
+        }
+      }
+
+      setConfirmed(true);
+      loadPendingOrders();
+    } catch (e: any) {
+      setError(`발송 처리 실패: ${e.message || '알 수 없는 오류'}. 잠시 후 다시 시도해주세요.`);
+    } finally {
+      setConfirming(false);
+      setConfirmProgress(null);
+    }
   };
 
   if (loading) {
@@ -188,6 +252,15 @@ export default function ShipmentConfirm() {
 
   return (
     <div className="space-y-5 max-w-lg">
+      {error && (
+        <div className="flex items-start gap-2 bg-red-50 border border-red-200 rounded-xl p-3">
+          <AlertTriangle size={16} className="text-red-600 flex-shrink-0 mt-0.5" />
+          <div>
+            <p className="text-sm text-red-800">{error}</p>
+            <button onClick={loadPendingOrders} className="text-xs text-red-600 underline mt-1">다시 시도</button>
+          </div>
+        </div>
+      )}
       <div className="flex items-center justify-between">
         <h2 className="text-xl font-bold text-gray-900">발송 확인</h2>
         {workOrders.length > 1 && (
@@ -247,13 +320,42 @@ export default function ShipmentConfirm() {
         </div>
       </div>
 
+      {confirming && (
+        <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 space-y-3">
+          <p className="text-sm text-blue-700 font-medium text-center">
+            {confirmProgress?.step ?? '처리 중...'}
+          </p>
+          {confirmProgress && (
+            <>
+              <div className="w-full bg-blue-200 rounded-full h-2.5 overflow-hidden">
+                <div
+                  className="bg-blue-600 h-2.5 rounded-full transition-all duration-300"
+                  style={{ width: `${Math.round((confirmProgress.current / confirmProgress.total) * 100)}%` }}
+                />
+              </div>
+              <p className="text-xs text-blue-500 text-center">
+                {confirmProgress.current} / {confirmProgress.total}
+                ({Math.round((confirmProgress.current / confirmProgress.total) * 100)}%)
+              </p>
+            </>
+          )}
+        </div>
+      )}
+      {hasShortage && (
+        <div className="flex items-start gap-2 bg-red-50 border border-red-200 rounded-xl p-3">
+          <AlertTriangle size={16} className="text-red-600 flex-shrink-0 mt-0.5" />
+          <p className="text-sm text-red-800">
+            재고 부족 품목이 있어 발송을 진행할 수 없습니다. 재고를 보충한 후 다시 시도해주세요.
+          </p>
+        </div>
+      )}
       <button
         onClick={handleConfirm}
-        disabled={confirming}
-        className="w-full bg-blue-600 text-white py-3.5 rounded-xl font-semibold hover:bg-blue-700 disabled:opacity-60 transition-colors flex items-center justify-center gap-2 text-base"
+        disabled={confirming || hasShortage}
+        className="w-full bg-blue-600 text-white py-3.5 rounded-xl font-semibold hover:bg-blue-700 disabled:opacity-60 disabled:cursor-not-allowed transition-colors flex items-center justify-center gap-2 text-base"
       >
         <Truck size={20} />
-        {confirming ? '처리 중...' : '발송 완료 확인'}
+        {confirming ? '처리 중...' : hasShortage ? '재고 부족 — 발송 불가' : '발송 완료 확인'}
       </button>
       <p className="text-xs text-center text-gray-400">
         버튼 클릭 시 플레이위즈에 발송 완료 신호가 전달됩니다

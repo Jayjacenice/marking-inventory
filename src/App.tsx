@@ -13,6 +13,8 @@ import Dashboard from './pages/admin/Dashboard';
 import WorkOrderUpload from './pages/admin/WorkOrderUpload';
 import Downloads from './pages/admin/Downloads';
 import BOMManage from './pages/admin/BOMManage';
+import UserManage from './pages/admin/UserManage';
+import InventoryUpload from './pages/admin/InventoryUpload';
 import ShipmentConfirm from './pages/offline/ShipmentConfirm';
 import ReceiptCheck from './pages/playwith/ReceiptCheck';
 import MarkingWork from './pages/playwith/MarkingWork';
@@ -21,10 +23,17 @@ import type { UserRole, AppUser } from './types';
 function AppContent() {
   const [user, setUser] = useState<AppUser | null>(null);
   const [loading, setLoading] = useState(true);
+  const [viewAs, setViewAs] = useState<UserRole | null>(null);
   const navigate = useNavigate();
 
   useEffect(() => {
+    // 5초 타임아웃: getSession이 navigator lock으로 무한 대기하는 경우 방지
+    const timeout = setTimeout(() => {
+      setLoading(false);
+    }, 1000);
+
     supabase.auth.getSession().then(async ({ data: { session } }) => {
+      clearTimeout(timeout);
       if (session) {
         await loadUserProfile(session.user.id, session.user.email || '');
       } else {
@@ -43,7 +52,10 @@ function AppContent() {
       }
     );
 
-    return () => subscription.unsubscribe();
+    return () => {
+      clearTimeout(timeout);
+      subscription.unsubscribe();
+    };
   }, []);
 
   const loadUserProfile = async (userId: string, email: string) => {
@@ -93,14 +105,28 @@ function AppContent() {
     );
   }
 
+  const handleViewAsChange = (role: UserRole | null) => {
+    setViewAs(role);
+    if (role === 'offline') navigate('/offline/shipment');
+    else if (role === 'playwith') navigate('/playwith/receipt');
+    else navigate('/admin/dashboard');
+  };
+
   return (
-    <Layout role={user.role} userName={user.name}>
+    <Layout
+      role={user.role}
+      userName={user.name}
+      viewAs={viewAs}
+      onViewAsChange={handleViewAsChange}
+    >
       <Routes>
         {/* 관리자 */}
         <Route path="/admin/dashboard" element={<Dashboard />} />
         <Route path="/admin/workorder" element={<WorkOrderUpload />} />
         <Route path="/admin/downloads" element={<Downloads />} />
         <Route path="/admin/bom" element={<BOMManage />} />
+        <Route path="/admin/inventory" element={<InventoryUpload />} />
+        <Route path="/admin/users" element={<UserManage />} />
 
         {/* 오프라인 매장 */}
         <Route path="/offline/shipment" element={<ShipmentConfirm />} />
