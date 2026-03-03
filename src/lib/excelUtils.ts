@@ -1,0 +1,159 @@
+import * as XLSX from 'xlsx';
+
+// ──────────────────────────────────────────────
+// 타입 정의
+// ──────────────────────────────────────────────
+
+export interface ExcelMatchedItem {
+  skuId: string;
+  uploadedQty: number;
+}
+
+export interface ExcelParseResult {
+  matched: ExcelMatchedItem[];
+  unmatched: string[]; // 매칭 실패 식별자 목록
+}
+
+export interface ExcelItem {
+  skuId: string;
+  skuName: string;
+  barcode: string | null;
+}
+
+// ──────────────────────────────────────────────
+// 컬럼 자동 탐지 패턴
+// ──────────────────────────────────────────────
+
+const SKU_ID_PATTERNS = ['sku_id', 'skuid', 'sku id', 'sku', '품목코드', 'item_id', 'itemid', 'item id'];
+const BARCODE_PATTERNS = ['barcode', '바코드', 'bar_code', 'bar code'];
+const SKU_NAME_PATTERNS = ['sku_name', 'skuname', 'sku name', 'sku명', '품목명', '상품명', 'name', '이름'];
+const QTY_PATTERNS = ['qty', '수량', 'quantity', '개수', '발송수량', '입고수량', 'amount'];
+
+function normalizeHeader(header: unknown): string {
+  return String(header ?? '').toLowerCase().trim().replace(/\s+/g, ' ');
+}
+
+function findColumnIndex(headers: unknown[], patterns: string[]): number {
+  return headers.findIndex((h) => patterns.includes(normalizeHeader(h)));
+}
+
+// ──────────────────────────────────────────────
+// 엑셀 파싱 — SKU ID / 바코드 / SKU명 중 하나로 매칭
+// ──────────────────────────────────────────────
+
+export function parseQtyExcel(file: File, items: ExcelItem[]): Promise<ExcelParseResult> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+
+    reader.onload = (e) => {
+      try {
+        const data = e.target?.result;
+        const wb = XLSX.read(data, { type: 'array' });
+        const ws = wb.Sheets[wb.SheetNames[0]];
+        const rows = XLSX.utils.sheet_to_json<unknown[]>(ws, { header: 1 });
+
+        if (rows.length < 2) {
+          resolve({ matched: [], unmatched: [] });
+          return;
+        }
+
+        const headers = rows[0] as unknown[];
+
+        const skuIdCol = findColumnIndex(headers, SKU_ID_PATTERNS);
+        const barcodeCol = findColumnIndex(headers, BARCODE_PATTERNS);
+        const skuNameCol = findColumnIndex(headers, SKU_NAME_PATTERNS);
+        const qtyCol = findColumnIndex(headers, QTY_PATTERNS);
+
+        if (qtyCol === -1) {
+          reject(new Error('수량 컬럼을 찾을 수 없습니다. 헤더에 "수량" 또는 "qty"를 포함해주세요.'));
+          return;
+        }
+        if (skuIdCol === -1 && barcodeCol === -1 && skuNameCol === -1) {
+          reject(new Error('식별자 컬럼(SKU ID / 바코드 / SKU명)을 찾을 수 없습니다.'));
+          return;
+        }
+
+        // 룩업 맵 구성
+        const skuIdMap = new Map<string, string>();
+        const barcodeMap = new Map<string, string>();
+        const skuNameMap = new Map<string, string>();
+
+        for (const item of items) {
+          skuIdMap.set(item.skuId.toLowerCase(), item.skuId);
+          if (item.barcode) barcodeMap.set(item.barcode.toLowerCase(), item.skuId);
+          skuNameMap.set(item.skuName.toLowerCase(), item.skuId);
+        }
+
+        const matched: ExcelMatchedItem[] = [];
+        const unmatched: string[] = [];
+
+        for (let i = 1; i < rows.length; i++) {
+          const row = rows[i] as unknown[];
+
+          // 수량 파싱
+          const rawQty = row[qtyCol];
+          if (rawQty == null || rawQty === '') continue;
+          const qty = Number(rawQty);
+          if (isNaN(qty)) continue;
+
+          let matchedSkuId: string | undefined;
+          let identifier = '';
+
+          // 1순위: SKU ID
+          if (skuIdCol !== -1 && row[skuIdCol] != null) {
+            const val = String(row[skuIdCol]).trim().toLowerCase();
+            identifier = val;
+            matchedSkuId = skuIdMap.get(val);
+          }
+
+          // 2순위: 바코드
+          if (!matchedSkuId && barcodeCol !== -1 && row[barcodeCol] != null) {
+            const val = String(row[barcodeCol]).trim().toLowerCase();
+            if (!identifier) identifier = val;
+            matchedSkuId = barcodeMap.get(val);
+          }
+
+          // 3순위: SKU명
+          if (!matchedSkuId && skuNameCol !== -1 && row[skuNameCol] != null) {
+            const val = String(row[skuNameCol]).trim().toLowerCase();
+            if (!identifier) identifier = val;
+            matchedSkuId = skuNameMap.get(val);
+          }
+
+          if (matchedSkuId) {
+            matched.push({ skuId: matchedSkuId, uploadedQty: Math.max(0, qty) });
+          } else if (identifier) {
+            unmatched.push(identifier);
+          }
+        }
+
+        resolve({ matched, unmatched });
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : '알 수 없는 오류';
+        reject(new Error(`엑셀 파싱 실패: ${msg}`));
+      }
+    };
+
+    reader.onerror = () => reject(new Error('파일 읽기 실패'));
+    reader.readAsArrayBuffer(file);
+  });
+}
+
+// ──────────────────────────────────────────────
+// 양식 다운로드 — 현재 품목 목록 기반
+// ──────────────────────────────────────────────
+
+export function generateTemplate(
+  items: { skuId: string; skuName: string; barcode?: string | null; qty: number }[],
+  filename: string
+): void {
+  const wsData = [
+    ['SKU ID', 'SKU명', '바코드', '수량'],
+    ...items.map((item) => [item.skuId, item.skuName, item.barcode ?? '', item.qty]),
+  ];
+  const ws = XLSX.utils.aoa_to_sheet(wsData);
+  ws['!cols'] = [{ wch: 20 }, { wch: 30 }, { wch: 16 }, { wch: 10 }];
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, '수량입력');
+  XLSX.writeFile(wb, filename);
+}

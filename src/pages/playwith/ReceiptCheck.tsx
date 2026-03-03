@@ -1,10 +1,12 @@
-import { useEffect, useState } from 'react';
+import { type ChangeEvent, useEffect, useRef, useState } from 'react';
 import { supabase } from '../../lib/supabase';
-import { CheckCircle, AlertTriangle } from 'lucide-react';
+import { AlertTriangle, CheckCircle, Download, FileUp, X } from 'lucide-react';
+import { generateTemplate, parseQtyExcel } from '../../lib/excelUtils';
 
 interface ReceiptItem {
   skuId: string;
   skuName: string;
+  barcode: string | null;
   expectedQty: number;
   actualQty: number;
 }
@@ -12,6 +14,14 @@ interface ReceiptItem {
 interface PendingOrder {
   id: string;
   download_date: string;
+}
+
+interface ComparisonRow {
+  skuId: string;
+  skuName: string;
+  expected: number;
+  uploaded: number;
+  diff: number;
 }
 
 export default function ReceiptCheck() {
@@ -23,6 +33,9 @@ export default function ReceiptCheck() {
   const [saveProgress, setSaveProgress] = useState<{ current: number; total: number; step: string } | null>(null);
   const [done, setDone] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [uploadComparison, setUploadComparison] = useState<{ rows: ComparisonRow[]; unmatched: string[] } | null>(null);
+  const [xlsxError, setXlsxError] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     loadOrders();
@@ -53,20 +66,23 @@ export default function ReceiptCheck() {
     setLoading(true);
     setDone(false);
     setError(null);
+    setUploadComparison(null);
+    setXlsxError(null);
     try {
+      // 바코드 포함 조회
       const { data: lines, error: linesErr } = await supabase
         .from('work_order_line')
-        .select('finished_sku_id, sent_qty, needs_marking, finished_sku:sku!work_order_line_finished_sku_id_fkey(sku_name)')
+        .select('finished_sku_id, sent_qty, needs_marking, finished_sku:sku!work_order_line_finished_sku_id_fkey(sku_name, barcode)')
         .eq('work_order_id', wo.id);
       if (linesErr) throw linesErr;
 
       const { data: bomData, error: bomErr } = await supabase
         .from('bom')
-        .select('finished_sku_id, component_sku_id, quantity, component:sku!bom_component_sku_id_fkey(sku_id, sku_name)');
+        .select('finished_sku_id, component_sku_id, quantity, component:sku!bom_component_sku_id_fkey(sku_id, sku_name, barcode)');
       if (bomErr) throw bomErr;
 
       // 단품 단위로 집계
-      const componentMap: Record<string, { skuId: string; skuName: string; qty: number }> = {};
+      const componentMap: Record<string, { skuId: string; skuName: string; barcode: string | null; qty: number }> = {};
 
       for (const line of (lines || []) as any[]) {
         if (line.needs_marking) {
@@ -74,7 +90,12 @@ export default function ReceiptCheck() {
           for (const bom of boms as any[]) {
             const key = bom.component_sku_id;
             if (!componentMap[key]) {
-              componentMap[key] = { skuId: bom.component_sku_id, skuName: bom.component?.sku_name || '', qty: 0 };
+              componentMap[key] = {
+                skuId: bom.component_sku_id,
+                skuName: bom.component?.sku_name || '',
+                barcode: bom.component?.barcode || null,
+                qty: 0,
+              };
             }
             componentMap[key].qty += bom.quantity * line.sent_qty;
           }
@@ -82,6 +103,7 @@ export default function ReceiptCheck() {
           componentMap[line.finished_sku_id] = {
             skuId: line.finished_sku_id,
             skuName: line.finished_sku?.sku_name || line.finished_sku_id,
+            barcode: line.finished_sku?.barcode || null,
             qty: line.sent_qty,
           };
         }
@@ -91,8 +113,9 @@ export default function ReceiptCheck() {
         Object.values(componentMap).map((c) => ({
           skuId: c.skuId,
           skuName: c.skuName,
+          barcode: c.barcode,
           expectedQty: c.qty,
-          actualQty: c.qty, // 기본값: 예정 수량
+          actualQty: c.qty,
         }))
       );
     } catch (e: any) {
@@ -111,13 +134,63 @@ export default function ReceiptCheck() {
     );
   };
 
+  // ── 엑셀 양식 다운로드 ─────────────────────────
+  const handleDownloadTemplate = () => {
+    generateTemplate(
+      items.map((item) => ({
+        skuId: item.skuId,
+        skuName: item.skuName,
+        barcode: item.barcode,
+        qty: item.actualQty,
+      })),
+      `입고수량_${selectedOrder?.download_date || '양식'}.xlsx`
+    );
+  };
+
+  // ── 엑셀 업로드 → actualQty 적용 + 비교 패널 ──
+  const handleExcelUpload = async (e: ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setXlsxError(null);
+    setUploadComparison(null);
+    try {
+      const result = await parseQtyExcel(
+        file,
+        items.map((item) => ({ skuId: item.skuId, skuName: item.skuName, barcode: item.barcode }))
+      );
+
+      // actualQty 일괄 업데이트
+      const matchMap = new Map(result.matched.map((m) => [m.skuId, m.uploadedQty]));
+      setItems((prev) =>
+        prev.map((item) =>
+          matchMap.has(item.skuId) ? { ...item, actualQty: matchMap.get(item.skuId)! } : item
+        )
+      );
+
+      // 비교 데이터 구성
+      const rows: ComparisonRow[] = result.matched.map((m) => {
+        const item = items.find((i) => i.skuId === m.skuId);
+        return {
+          skuId: m.skuId,
+          skuName: item?.skuName || m.skuId,
+          expected: item?.expectedQty ?? 0,
+          uploaded: m.uploadedQty,
+          diff: m.uploadedQty - (item?.expectedQty ?? 0),
+        };
+      });
+      setUploadComparison({ rows, unmatched: result.unmatched });
+    } catch (err: any) {
+      setXlsxError(err.message || '파일 처리 실패');
+    }
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  };
+
   const handleConfirm = async () => {
     if (!selectedOrder) return;
     setSaving(true);
     setSaveProgress(null);
     setError(null);
     try {
-      // 작업지시서 라인의 received_qty 업데이트
       setSaveProgress({ current: 1, total: 3, step: '데이터 조회 중...' });
       const { data: lines, error: linesErr } = await supabase
         .from('work_order_line')
@@ -130,7 +203,6 @@ export default function ReceiptCheck() {
         .select('finished_sku_id, component_sku_id, quantity');
       if (bomErr) throw bomErr;
 
-      // 실제 입고 수량 기반으로 완제품 단위 received_qty 계산
       const actualMap: Record<string, number> = {};
       for (const item of items) actualMap[item.skuId] = item.actualQty;
 
@@ -154,7 +226,6 @@ export default function ReceiptCheck() {
         if (updateErr) throw updateErr;
       }
 
-      // 상태 업데이트
       setSaveProgress({ current: lineList.length + 1, total: lineList.length + 1, step: '상태 업데이트 중...' });
       const { error: statusErr } = await supabase
         .from('work_order')
@@ -204,6 +275,7 @@ export default function ReceiptCheck() {
 
   return (
     <div className="space-y-5 max-w-lg">
+      {/* 에러 */}
       {error && (
         <div className="flex items-start gap-2 bg-red-50 border border-red-200 rounded-xl p-3">
           <AlertTriangle size={16} className="text-red-600 flex-shrink-0 mt-0.5" />
@@ -213,6 +285,8 @@ export default function ReceiptCheck() {
           </div>
         </div>
       )}
+
+      {/* 헤더 */}
       <h2 className="text-xl font-bold text-gray-900">입고 확인</h2>
 
       {orders.length > 1 && (
@@ -232,6 +306,97 @@ export default function ReceiptCheck() {
         </select>
       )}
 
+      {/* 엑셀 버튼 */}
+      <div className="flex gap-2">
+        <button
+          onClick={handleDownloadTemplate}
+          className="flex items-center gap-1.5 px-3 py-2 text-sm border border-gray-300 rounded-lg text-gray-600 hover:bg-gray-50 transition-colors"
+        >
+          <Download size={15} />
+          양식 다운로드
+        </button>
+        <button
+          onClick={() => fileInputRef.current?.click()}
+          className="flex items-center gap-1.5 px-3 py-2 text-sm border border-blue-300 rounded-lg text-blue-600 hover:bg-blue-50 transition-colors"
+        >
+          <FileUp size={15} />
+          엑셀 업로드
+        </button>
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept=".xlsx,.xls,.csv"
+          className="hidden"
+          onChange={handleExcelUpload}
+        />
+      </div>
+
+      {/* 엑셀 파싱 에러 */}
+      {xlsxError && (
+        <div className="flex items-start gap-2 bg-red-50 border border-red-200 rounded-xl p-3">
+          <AlertTriangle size={16} className="text-red-600 flex-shrink-0 mt-0.5" />
+          <p className="text-sm text-red-800">{xlsxError}</p>
+        </div>
+      )}
+
+      {/* 업로드 비교 패널 */}
+      {uploadComparison && (
+        <div className="bg-white rounded-xl shadow-sm border border-blue-100 overflow-hidden">
+          <div className="px-4 py-3 border-b border-gray-50 flex items-center justify-between">
+            <div>
+              <p className="text-sm font-medium text-gray-900">📊 업로드 비교 결과</p>
+              <p className="text-xs text-gray-400 mt-0.5">{uploadComparison.rows.length}개 품목 수량 적용됨</p>
+            </div>
+            <button
+              onClick={() => setUploadComparison(null)}
+              className="text-gray-400 hover:text-gray-600 transition-colors p-1"
+            >
+              <X size={15} />
+            </button>
+          </div>
+
+          {/* 비교 테이블 헤더 */}
+          <div className="grid grid-cols-4 px-4 py-2 bg-gray-50 text-xs text-gray-500 font-medium border-b border-gray-100">
+            <span>SKU명</span>
+            <span className="text-right">예정</span>
+            <span className="text-right">업로드</span>
+            <span className="text-right">차이</span>
+          </div>
+
+          <div className="divide-y divide-gray-50 max-h-56 overflow-y-auto">
+            {uploadComparison.rows.map((row) => (
+              <div key={row.skuId} className="grid grid-cols-4 px-4 py-2.5 text-xs items-center">
+                <span className="text-gray-800 truncate pr-2">{row.skuName}</span>
+                <span className="text-right text-gray-500">{row.expected}</span>
+                <span className="text-right text-gray-800 font-medium">{row.uploaded}</span>
+                <span
+                  className={`text-right font-medium ${
+                    row.diff > 0
+                      ? 'text-orange-600'
+                      : row.diff < 0
+                      ? 'text-red-600'
+                      : 'text-gray-400'
+                  }`}
+                >
+                  {row.diff > 0 ? `+${row.diff}` : row.diff === 0 ? '—' : row.diff}
+                </span>
+              </div>
+            ))}
+          </div>
+
+          {uploadComparison.unmatched.length > 0 && (
+            <div className="px-4 py-2.5 border-t border-gray-100 bg-yellow-50">
+              <p className="text-xs text-yellow-800">
+                ⚠️ 미매칭 {uploadComparison.unmatched.length}개:{' '}
+                {uploadComparison.unmatched.slice(0, 3).join(', ')}
+                {uploadComparison.unmatched.length > 3 && ` 외 ${uploadComparison.unmatched.length - 3}개`}
+              </p>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* 품목 카드 */}
       <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
         <div className="px-5 py-4 border-b border-gray-50">
           <h3 className="font-medium text-gray-900">📬 입고 확인 — {selectedOrder?.download_date}</h3>
@@ -264,9 +429,11 @@ export default function ReceiptCheck() {
                     <span className="text-sm text-gray-500">개</span>
                   </div>
                   {item.actualQty !== item.expectedQty && (
-                    <span className={`text-xs font-medium ${
-                      item.actualQty > item.expectedQty ? 'text-orange-600' : 'text-red-600'
-                    }`}>
+                    <span
+                      className={`text-xs font-medium ${
+                        item.actualQty > item.expectedQty ? 'text-orange-600' : 'text-red-600'
+                      }`}
+                    >
                       {item.actualQty > item.expectedQty
                         ? `+${item.actualQty - item.expectedQty}`
                         : `${item.actualQty - item.expectedQty}`}
@@ -309,6 +476,7 @@ export default function ReceiptCheck() {
           )}
         </div>
       )}
+
       <button
         onClick={handleConfirm}
         disabled={saving}
