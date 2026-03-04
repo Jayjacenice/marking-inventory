@@ -48,36 +48,42 @@ export default function UserManage({ currentUserId }: Props) {
 
   const loadUsers = async () => {
     setLoading(true);
-    const { data: profiles } = await supabase
-      .from('user_profile')
-      .select('id, name, role, created_at')
-      .order('created_at', { ascending: false });
+    try {
+      const { data: profiles, error: profileErr } = await supabase
+        .from('user_profile')
+        .select('id, name, role, created_at')
+        .order('created_at', { ascending: false });
+      if (profileErr) throw profileErr;
 
-    if (profiles) {
-      const { data: authData } = await supabaseAdmin.auth.admin.listUsers({ perPage: 1000 });
-      const authMap = new Map<string, string>();
-      if (authData?.users) {
-        for (const u of authData.users) {
-          authMap.set(u.id, u.email || '');
+      if (profiles) {
+        const { data: authData } = await supabaseAdmin.auth.admin.listUsers({ perPage: 1000 });
+        const authMap = new Map<string, string>();
+        if (authData?.users) {
+          for (const u of authData.users) {
+            authMap.set(u.id, u.email || '');
+          }
         }
-      }
 
-      const mapped: ManagedUser[] = (profiles as any[]).map((p) => {
-        const email = authMap.get(p.id) || '';
-        const userId = email.endsWith('@marking.internal')
-          ? email.replace('@marking.internal', '')
-          : email;
-        return {
-          id: p.id,
-          userId,
-          name: p.name,
-          role: p.role as UserRole,
-          created_at: p.created_at,
-        };
-      });
-      setUsers(mapped);
+        const mapped: ManagedUser[] = (profiles as any[]).map((p) => {
+          const email = authMap.get(p.id) || '';
+          const userId = email.endsWith('@marking.internal')
+            ? email.replace('@marking.internal', '')
+            : email;
+          return {
+            id: p.id,
+            userId,
+            name: p.name,
+            role: p.role as UserRole,
+            created_at: p.created_at,
+          };
+        });
+        setUsers(mapped);
+      }
+    } catch (err) {
+      console.error('loadUsers error:', err);
+    } finally {
+      setLoading(false);
     }
-    setLoading(false);
   };
 
   const resetForm = () => {
