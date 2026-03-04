@@ -92,10 +92,14 @@ export default function ShipmentConfirm() {
 
       const offlineWarehouseId = (warehouses as any)?.id;
 
-      // BOM — 단품 바코드 포함 조회
+      // BOM — 마킹 대상 finished_sku_id로 필터링 후 조회 (필터 없으면 1,000행 제한에 걸려 누락 발생)
+      const markingSkuIds = ((lines || []) as any[])
+        .filter((l) => l.needs_marking)
+        .map((l) => l.finished_sku_id as string);
       const { data: bomData, error: bomErr } = await supabase
         .from('bom')
-        .select('finished_sku_id, component_sku_id, quantity, component:sku!bom_component_sku_id_fkey(sku_id, sku_name, barcode)');
+        .select('finished_sku_id, component_sku_id, quantity, component:sku!bom_component_sku_id_fkey(sku_id, sku_name, barcode)')
+        .in('finished_sku_id', markingSkuIds.length > 0 ? markingSkuIds : ['__none__']);
       if (bomErr) throw bomErr;
 
       // 오프라인샵 재고 조회
@@ -128,7 +132,10 @@ export default function ShipmentConfirm() {
                 skuName: bom.component?.sku_name || bom.component_sku_id,
                 barcode: bom.component?.barcode || null,
                 needed: 0,
-                isMarking: bom.component?.sku_name?.includes('마킹') || false,
+                isMarking:
+                  bom.component_sku_id?.includes('MK') ||
+                  bom.component?.sku_name?.includes('마킹') ||
+                  false,
               };
             }
             componentMap[key].needed += bom.quantity * line.ordered_qty;
@@ -248,12 +255,15 @@ export default function ShipmentConfirm() {
         .eq('work_order_id', selectedWo.id);
       if (linesErr) throw linesErr;
 
+      const lineList = (lines || []) as any[];
+      const confirmMarkingSkuIds = lineList
+        .filter((l) => l.needs_marking)
+        .map((l) => l.finished_sku_id as string);
       const { data: bomData, error: bomErr } = await supabase
         .from('bom')
-        .select('finished_sku_id, component_sku_id, quantity');
+        .select('finished_sku_id, component_sku_id, quantity')
+        .in('finished_sku_id', confirmMarkingSkuIds.length > 0 ? confirmMarkingSkuIds : ['__none__']);
       if (bomErr) throw bomErr;
-
-      const lineList = (lines || []) as any[];
       const totalSteps = lineList.length + items.length + 2;
       let step = 3;
 
