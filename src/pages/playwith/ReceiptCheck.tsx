@@ -237,10 +237,11 @@ export default function ReceiptCheck() {
       for (let i = 0; i < lineList.length; i++) {
         const line = lineList[i];
         setSaveProgress({ current: i + 1, total: lineList.length + 1, step: `입고 수량 처리 중... (${i + 1} / ${lineList.length})` });
-        // received_qty = 주문 세트 수 (ordered_qty)
-        // actualMap은 BOM 전개된 전체 합산값이므로 per-line 역산 시
-        // 공유 컴포넌트로 인해 과다 계산됨 → ordered_qty 사용
-        const receivedQty = line.ordered_qty;
+        // needs_marking=true: BOM 공유 컴포넌트로 역산 불가 → ordered_qty 유지
+        // needs_marking=false: 단품이므로 사용자 입력값(actualMap) 직접 사용
+        const receivedQty = line.needs_marking
+          ? line.ordered_qty
+          : (actualMap[line.finished_sku_id] ?? line.ordered_qty);
         const { error: updateErr } = await supabase
           .from('work_order_line')
           .update({ received_qty: receivedQty })
