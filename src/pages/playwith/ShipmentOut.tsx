@@ -1,8 +1,9 @@
 import { type ChangeEvent, useEffect, useRef, useState } from 'react';
 import { supabase } from '../../lib/supabase';
 import { useStaleGuard } from '../../hooks/useStaleGuard';
-import { AlertTriangle, CheckCircle, Download, FileUp, Truck, X, Info } from 'lucide-react';
+import { AlertTriangle, CheckCircle, Download, FileUp, Truck, Info } from 'lucide-react';
 import { generateTemplate, parseQtyExcel } from '../../lib/excelUtils';
+import ComparisonPanel, { type ComparisonRow } from '../../components/ComparisonPanel';
 
 interface ShipmentOutItem {
   finishedSkuId: string;
@@ -18,14 +19,6 @@ interface ShipmentOutItem {
 interface ActiveWorkOrder {
   id: string;
   download_date: string;
-}
-
-interface ComparisonRow {
-  skuId: string;
-  skuName: string;
-  expected: number;
-  uploaded: number;
-  diff: number;
 }
 
 export default function ShipmentOut() {
@@ -399,58 +392,11 @@ export default function ShipmentOut() {
 
       {/* 업로드 비교 패널 */}
       {uploadComparison && (
-        <div className="bg-white rounded-xl shadow-sm border border-emerald-100 overflow-hidden">
-          <div className="px-4 py-3 border-b border-gray-50 flex items-center justify-between">
-            <div>
-              <p className="text-sm font-medium text-gray-900">업로드 비교 결과</p>
-              <p className="text-xs text-gray-400 mt-0.5">{uploadComparison.rows.length}개 품목 수량 적용됨</p>
-            </div>
-            <button
-              onClick={() => setUploadComparison(null)}
-              className="text-gray-400 hover:text-gray-600 transition-colors p-1"
-            >
-              <X size={15} />
-            </button>
-          </div>
-
-          <div className="grid grid-cols-4 px-4 py-2 bg-gray-50 text-xs text-gray-500 font-medium border-b border-gray-100">
-            <span>SKU명</span>
-            <span className="text-right">예정</span>
-            <span className="text-right">업로드</span>
-            <span className="text-right">차이</span>
-          </div>
-
-          <div className="divide-y divide-gray-50 max-h-56 overflow-y-auto">
-            {uploadComparison.rows.map((row) => (
-              <div key={row.skuId} className="grid grid-cols-4 px-4 py-2.5 text-xs items-center">
-                <span className="text-gray-800 truncate pr-2">{row.skuName}</span>
-                <span className="text-right text-gray-500">{row.expected}</span>
-                <span className="text-right text-gray-800 font-medium">{row.uploaded}</span>
-                <span
-                  className={`text-right font-medium ${
-                    row.diff > 0
-                      ? 'text-orange-600'
-                      : row.diff < 0
-                      ? 'text-red-600'
-                      : 'text-gray-400'
-                  }`}
-                >
-                  {row.diff > 0 ? `+${row.diff}` : row.diff === 0 ? '—' : row.diff}
-                </span>
-              </div>
-            ))}
-          </div>
-
-          {uploadComparison.unmatched.length > 0 && (
-            <div className="px-4 py-2.5 border-t border-gray-100 bg-yellow-50">
-              <p className="text-xs text-yellow-800">
-                미매칭 {uploadComparison.unmatched.length}개:{' '}
-                {uploadComparison.unmatched.slice(0, 3).join(', ')}
-                {uploadComparison.unmatched.length > 3 && ` 외 ${uploadComparison.unmatched.length - 3}개`}
-              </p>
-            </div>
-          )}
-        </div>
+        <ComparisonPanel
+          rows={uploadComparison.rows}
+          unmatched={uploadComparison.unmatched}
+          onClose={() => setUploadComparison(null)}
+        />
       )}
 
       {/* 품목 카드 — 완성품/단품 2컬럼 */}

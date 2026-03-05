@@ -2,6 +2,7 @@ import { type ChangeEvent, useEffect, useRef, useState } from 'react';
 import { supabase } from '../../lib/supabase';
 import { useStaleGuard } from '../../hooks/useStaleGuard';
 import { generateTemplate, parseQtyExcel } from '../../lib/excelUtils';
+import ComparisonPanel, { type ComparisonRow } from '../../components/ComparisonPanel';
 import {
   AlertTriangle,
   CheckCircle,
@@ -10,7 +11,6 @@ import {
   Clock,
   Download,
   FileUp,
-  X,
 } from 'lucide-react';
 
 // ── 인터페이스 ──────────────────────────────────
@@ -31,14 +31,6 @@ interface MarkingItem {
 interface ActiveOrder {
   id: string;
   download_date: string;
-}
-
-interface ComparisonRow {
-  skuId: string;
-  skuName: string;
-  expected: number;
-  uploaded: number;
-  diff: number;
 }
 
 interface HistoryItem {
@@ -70,7 +62,7 @@ export default function MarkingWork() {
 
   // 엑셀 관련
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const [uploadComparison, setUploadComparison] = useState<ComparisonRow[] | null>(null);
+  const [uploadComparison, setUploadComparison] = useState<{ rows: ComparisonRow[]; unmatched: string[] } | null>(null);
   const [xlsxError, setXlsxError] = useState<string | null>(null);
 
   // 날짜 관리
@@ -294,11 +286,10 @@ export default function MarkingWork() {
         }))
         .filter((r) => r.uploaded > 0 || matchMap.has(r.skuId));
 
-      if (result.unmatched.length > 0) {
-        setXlsxError(`매칭 실패: ${result.unmatched.join(', ')}`);
-      }
       if (compRows.length > 0) {
-        setUploadComparison(compRows);
+        setUploadComparison({ rows: compRows, unmatched: result.unmatched });
+      } else if (result.unmatched.length > 0) {
+        setXlsxError(`매칭 실패: ${result.unmatched.join(', ')}`);
       }
     } catch (err: any) {
       setXlsxError(err.message || '엑셀 파싱 실패');
@@ -706,48 +697,11 @@ export default function MarkingWork() {
 
           {/* 업로드 비교 패널 */}
           {uploadComparison && (
-            <div className="bg-white rounded-xl shadow-sm border border-blue-100 overflow-hidden">
-              <div className="px-4 py-3 border-b border-gray-50 flex items-center justify-between">
-                <div>
-                  <p className="text-sm font-medium text-gray-900">업로드 비교 결과</p>
-                  <p className="text-xs text-gray-400 mt-0.5">
-                    {uploadComparison.length}개 품목 수량 적용됨
-                  </p>
-                </div>
-                <button
-                  onClick={() => setUploadComparison(null)}
-                  className="text-gray-400 hover:text-gray-600 transition-colors p-1"
-                >
-                  <X size={15} />
-                </button>
-              </div>
-              <div className="overflow-x-auto">
-                <table className="w-full text-sm">
-                  <thead>
-                    <tr className="bg-gray-50 text-gray-500 text-xs">
-                      <th className="px-4 py-2 text-left font-medium">SKU명</th>
-                      <th className="px-4 py-2 text-right font-medium">잔여</th>
-                      <th className="px-4 py-2 text-right font-medium">업로드</th>
-                      <th className="px-4 py-2 text-right font-medium">차이</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-gray-50">
-                    {uploadComparison.map((row) => (
-                      <tr key={row.skuId}>
-                        <td className="px-4 py-2 text-gray-900 truncate max-w-[200px]">{row.skuName}</td>
-                        <td className="px-4 py-2 text-right text-gray-500">{row.expected}</td>
-                        <td className="px-4 py-2 text-right text-gray-900 font-medium">{row.uploaded}</td>
-                        <td className={`px-4 py-2 text-right font-medium ${
-                          row.diff === 0 ? 'text-green-600' : row.diff < 0 ? 'text-red-600' : 'text-orange-600'
-                        }`}>
-                          {row.diff > 0 ? `+${row.diff}` : row.diff}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </div>
+            <ComparisonPanel
+              rows={uploadComparison.rows}
+              unmatched={uploadComparison.unmatched}
+              onClose={() => setUploadComparison(null)}
+            />
           )}
 
           {/* 총 수량 합계 */}
