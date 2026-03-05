@@ -163,11 +163,15 @@ export default function Downloads() {
       const s1Items = Object.values(s1Map);
 
       // ── STEP 2: 제작창고 P증가 (마킹 BOM + 단품 포함) ──
+      // 입고 P증가 = 이관 수량(sent_qty)과 동일해야 함 (보낸 만큼 받음)
+      // received_qty는 이전 버그로 과다 합산된 값이 DB에 남아있어 사용 불가
+      // 단품(needs_marking=false)만 received_qty가 정상이므로 구분 처리
       const s2Map: Record<string, PreviewItem> = {};
       for (const line of lineList) {
-        const qty = line.received_qty;
-        if (!qty || qty <= 0) continue;
         if (line.needs_marking) {
+          // 세트: sent_qty 기준 (received_qty는 이전 버그로 부정확)
+          const qty = line.sent_qty > 0 ? line.sent_qty : line.ordered_qty;
+          if (qty <= 0) continue;
           const boms = bomList.filter((b) => b.finished_sku_id === line.finished_sku_id);
           for (const bom of boms) {
             const key = bom.component_sku_id;
@@ -176,6 +180,11 @@ export default function Downloads() {
             s2Map[key].qty += bom.quantity * qty;
           }
         } else {
+          // 단품: received_qty 우선, 없으면 sent_qty → ordered_qty 폴백
+          const qty = line.received_qty > 0
+            ? line.received_qty
+            : (line.sent_qty > 0 ? line.sent_qty : line.ordered_qty);
+          if (qty <= 0) continue;
           const key = line.finished_sku_id;
           if (!s2Map[key])
             s2Map[key] = {
