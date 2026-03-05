@@ -269,7 +269,7 @@ export default function ShipmentConfirm() {
       const confirmMarkingSkuIds = lineList
         .filter((l) => l.needs_marking)
         .map((l) => l.finished_sku_id as string);
-      const { data: bomData, error: bomErr } = await supabase
+      const { error: bomErr } = await supabase
         .from('bom')
         .select('finished_sku_id, component_sku_id, quantity')
         .in('finished_sku_id', confirmMarkingSkuIds.length > 0 ? confirmMarkingSkuIds : ['__none__']);
