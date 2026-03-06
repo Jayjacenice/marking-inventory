@@ -205,7 +205,7 @@ export default function ReceiptCheck() {
     setSaveProgress(null);
     setError(null);
     try {
-      setSaveProgress({ current: 1, total: 3, step: '데이터 조회 중...' });
+      setSaveProgress({ current: 1, total: 4, step: '데이터 조회 중...' });
       const { data: lines, error: linesErr } = await supabase
         .from('work_order_line')
         .select('id, finished_sku_id, ordered_qty, needs_marking')
@@ -213,23 +213,15 @@ export default function ReceiptCheck() {
       if (linesErr) throw linesErr;
 
       const lineList = (lines || []) as any[];
-      const confirmMarkingSkuIds = lineList
-        .filter((l) => l.needs_marking)
-        .map((l) => l.finished_sku_id as string);
-      const { error: bomErr } = await supabase
-        .from('bom')
-        .select('finished_sku_id, component_sku_id, quantity')
-        .in('finished_sku_id', confirmMarkingSkuIds.length > 0 ? confirmMarkingSkuIds : ['__none__']);
-      if (bomErr) throw bomErr;
-
       const actualMap: Record<string, number> = {};
       for (const item of items) actualMap[item.skuId] = item.actualQty;
 
+      const stepsTotal = lineList.length + items.length + 3;
+
+      // ── received_qty 업데이트 ──
       for (let i = 0; i < lineList.length; i++) {
         const line = lineList[i];
-        setSaveProgress({ current: i + 1, total: lineList.length + 1, step: `입고 수량 처리 중... (${i + 1} / ${lineList.length})` });
-        // needs_marking=true: BOM 공유 컴포넌트로 역산 불가 → ordered_qty 유지
-        // needs_marking=false: 단품이므로 사용자 입력값(actualMap) 직접 사용
+        setSaveProgress({ current: i + 1, total: stepsTotal, step: `입고 수량 처리 중... (${i + 1} / ${lineList.length})` });
         const receivedQty = line.needs_marking
           ? line.ordered_qty
           : (actualMap[line.finished_sku_id] ?? line.ordered_qty);
@@ -240,7 +232,46 @@ export default function ReceiptCheck() {
         if (updateErr) throw updateErr;
       }
 
-      setSaveProgress({ current: lineList.length + 1, total: lineList.length + 1, step: '상태 업데이트 중...' });
+      // ── 플레이위즈 재고 증가 ──
+      setSaveProgress({ current: lineList.length + 1, total: stepsTotal, step: '플레이위즈 창고 조회 중...' });
+      const { data: pwWarehouse, error: pwWhErr } = await supabase
+        .from('warehouse')
+        .select('id')
+        .eq('name', '플레이위즈')
+        .maybeSingle();
+      if (pwWhErr) throw pwWhErr;
+
+      if (pwWarehouse) {
+        const pwWhId = (pwWarehouse as any).id;
+        for (let i = 0; i < items.length; i++) {
+          const item = items[i];
+          if (item.actualQty <= 0) continue;
+          setSaveProgress({
+            current: lineList.length + 2 + i,
+            total: stepsTotal,
+            step: `재고 반영 중... (${i + 1} / ${items.length})`,
+          });
+
+          const { data: existing } = await supabase
+            .from('inventory')
+            .select('quantity')
+            .eq('warehouse_id', pwWhId)
+            .eq('sku_id', item.skuId)
+            .maybeSingle();
+
+          const newQty = ((existing as any)?.quantity || 0) + item.actualQty;
+          const { error: upsertErr } = await supabase
+            .from('inventory')
+            .upsert(
+              { warehouse_id: pwWhId, sku_id: item.skuId, quantity: newQty },
+              { onConflict: 'warehouse_id,sku_id' }
+            );
+          if (upsertErr) throw upsertErr;
+        }
+      }
+
+      // ── 상태 업데이트 ──
+      setSaveProgress({ current: stepsTotal, total: stepsTotal, step: '상태 업데이트 중...' });
       const { error: statusErr } = await supabase
         .from('work_order')
         .update({ status: '입고확인완료' })

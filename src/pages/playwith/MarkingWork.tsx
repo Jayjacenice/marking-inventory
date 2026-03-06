@@ -65,6 +65,9 @@ export default function MarkingWork() {
   // 모든 라인 ID (이력 조회용)
   const [allLineIds, setAllLineIds] = useState<string[]>([]);
 
+  // BOM 맵: finishedSkuId → [{ componentSkuId, quantity }]
+  const [bomMap, setBomMap] = useState<Record<string, { componentSkuId: string; quantity: number }[]>>({});
+
   const isToday = selectedDate === today;
 
   useEffect(() => {
@@ -117,6 +120,22 @@ export default function MarkingWork() {
 
       const lineIds = ((lines || []) as any[]).map((l: any) => l.id);
       setAllLineIds(lineIds);
+
+      // BOM 로드 (마킹 시 구성품 재고 변경용)
+      const markingSkuIds = ((lines || []) as any[]).map((l: any) => l.finished_sku_id as string);
+      const { data: bomData, error: bomErr } = await supabase
+        .from('bom')
+        .select('finished_sku_id, component_sku_id, quantity')
+        .in('finished_sku_id', markingSkuIds.length > 0 ? markingSkuIds : ['__none__']);
+      if (bomErr) throw bomErr;
+      if (isStale()) return;
+
+      const bMap: Record<string, { componentSkuId: string; quantity: number }[]> = {};
+      for (const b of (bomData || []) as any[]) {
+        if (!bMap[b.finished_sku_id]) bMap[b.finished_sku_id] = [];
+        bMap[b.finished_sku_id].push({ componentSkuId: b.component_sku_id, quantity: b.quantity });
+      }
+      setBomMap(bMap);
 
       // 전체 daily_marking 조회 (이월 판별용)
       let allMarkings: any[] = [];
@@ -303,8 +322,17 @@ export default function MarkingWork() {
     setError(null);
     try {
       const activeItems = items.filter((item) => item.todayQty > 0);
-      const total = activeItems.length + 1;
+      const total = activeItems.length + 2;
       let processed = 0;
+
+      // 플레이위즈 warehouse ID 조회 (1회)
+      const { data: pwWarehouse, error: pwWhErr } = await supabase
+        .from('warehouse')
+        .select('id')
+        .eq('name', '플레이위즈')
+        .maybeSingle();
+      if (pwWhErr) throw pwWhErr;
+      const pwWhId = (pwWarehouse as any)?.id;
 
       for (const item of activeItems) {
         processed++;
@@ -352,6 +380,48 @@ export default function MarkingWork() {
           .update({ marked_qty: currentMarkedQty + diff })
           .eq('id', item.lineId);
         if (lineUpdateErr) throw lineUpdateErr;
+
+        // ── 재고 업데이트: 구성품 감소 + 완성품 증가 ──
+        if (diff !== 0 && pwWhId) {
+          const components = bomMap[item.finishedSkuId] || [];
+
+          // 구성품(component) 재고 감소
+          for (const comp of components) {
+            const deltaQty = comp.quantity * diff;
+            const { data: compInv } = await supabase
+              .from('inventory')
+              .select('quantity')
+              .eq('warehouse_id', pwWhId)
+              .eq('sku_id', comp.componentSkuId)
+              .maybeSingle();
+
+            const newCompQty = Math.max(0, ((compInv as any)?.quantity || 0) - deltaQty);
+            const { error: compErr } = await supabase
+              .from('inventory')
+              .upsert(
+                { warehouse_id: pwWhId, sku_id: comp.componentSkuId, quantity: newCompQty },
+                { onConflict: 'warehouse_id,sku_id' }
+              );
+            if (compErr) throw compErr;
+          }
+
+          // 완성품(finished) 재고 증가
+          const { data: finInv } = await supabase
+            .from('inventory')
+            .select('quantity')
+            .eq('warehouse_id', pwWhId)
+            .eq('sku_id', item.finishedSkuId)
+            .maybeSingle();
+
+          const newFinQty = Math.max(0, ((finInv as any)?.quantity || 0) + diff);
+          const { error: finErr } = await supabase
+            .from('inventory')
+            .upsert(
+              { warehouse_id: pwWhId, sku_id: item.finishedSkuId, quantity: newFinQty },
+              { onConflict: 'warehouse_id,sku_id' }
+            );
+          if (finErr) throw finErr;
+        }
       }
 
       // 모두 완료됐으면 상태 업데이트
