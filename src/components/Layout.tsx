@@ -17,6 +17,7 @@ import {
   ShieldCheck,
   Warehouse,
   Truck,
+  Package,
 } from 'lucide-react';
 
 interface NavItem {
@@ -55,6 +56,12 @@ const navItems: NavItem[] = [
     label: '재고 업로드',
     path: '/admin/inventory',
     icon: <Warehouse size={18} />,
+    roles: ['admin'],
+  },
+  {
+    label: '재고 관리',
+    path: '/admin/stock',
+    icon: <Package size={18} />,
     roles: ['admin'],
   },
   {

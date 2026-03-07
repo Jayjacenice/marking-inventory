@@ -20,6 +20,7 @@ import ReceiptCheck from './pages/playwith/ReceiptCheck';
 import MarkingWork from './pages/playwith/MarkingWork';
 import ShipmentOut from './pages/playwith/ShipmentOut';
 import ActivityHistory from './pages/admin/ActivityHistory';
+import InventoryManage from './pages/admin/InventoryManage';
 import type { UserRole, AppUser } from './types';
 
 function AppContent() {
@@ -159,6 +160,7 @@ function AppContent() {
         <Route path="/admin/downloads" element={<Downloads />} />
         <Route path="/admin/bom" element={<BOMManage />} />
         <Route path="/admin/inventory" element={<InventoryUpload />} />
+        <Route path="/admin/stock" element={<InventoryManage />} />
         {/* currentUserId를 prop으로 전달 → UserManage 내 getSession() 중복 제거 */}
         <Route path="/admin/users" element={<UserManage currentUserId={user.id} />} />
         <Route path="/admin/history" element={<ActivityHistory />} />
