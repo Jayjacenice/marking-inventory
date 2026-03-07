@@ -266,19 +266,14 @@ export default function UserManage({ currentUserId }: Props) {
 
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">아이디</label>
-              <div className="flex">
-                <input
-                  type="text"
-                  value={formUserId}
-                  onChange={(e) => setFormUserId(e.target.value)}
-                  disabled={!!editingUser}
-                  className="flex-1 border border-gray-300 rounded-l-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:bg-gray-100 disabled:text-gray-500"
-                  placeholder="shop1"
-                />
-                <span className="inline-flex items-center px-3 bg-gray-100 border border-l-0 border-gray-300 rounded-r-lg text-sm text-gray-500">
-                  @marking.internal
-                </span>
-              </div>
+              <input
+                type="text"
+                value={formUserId}
+                onChange={(e) => setFormUserId(e.target.value)}
+                disabled={!!editingUser}
+                className="w-full border border-gray-300 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:bg-gray-100 disabled:text-gray-500"
+                placeholder="아이디 입력"
+              />
             </div>
 
             <div>
