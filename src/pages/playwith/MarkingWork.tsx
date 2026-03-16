@@ -1,5 +1,6 @@
 import { type ChangeEvent, useEffect, useRef, useState } from 'react';
 import { supabase } from '../../lib/supabase';
+import { recordTransaction } from '../../lib/inventoryTransaction';
 import { useStaleGuard } from '../../hooks/useStaleGuard';
 import { generateTemplate, parseQtyExcel } from '../../lib/excelUtils';
 import ComparisonPanel, { type ComparisonRow } from '../../components/ComparisonPanel';
@@ -404,6 +405,17 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
                 { onConflict: 'warehouse_id,sku_id' }
               );
             if (compErr) throw compErr;
+            // 수불부: 구성품 출고 기록
+            if (deltaQty > 0) {
+              await recordTransaction({
+                warehouseId: pwWhId,
+                skuId: comp.componentSkuId,
+                txType: '출고',
+                quantity: deltaQty,
+                source: 'system',
+                memo: `마킹작업 구성품 차감 (${item.finishedSkuId})`,
+              });
+            }
           }
 
           // 완성품(finished) 재고 증가
@@ -422,6 +434,17 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
               { onConflict: 'warehouse_id,sku_id' }
             );
           if (finErr) throw finErr;
+          // 수불부: 완성품 입고 기록
+          if (diff > 0) {
+            await recordTransaction({
+              warehouseId: pwWhId,
+              skuId: item.finishedSkuId,
+              txType: '입고',
+              quantity: diff,
+              source: 'system',
+              memo: `마킹작업 완성품 증가`,
+            });
+          }
         }
       }
 

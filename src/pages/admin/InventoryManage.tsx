@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { supabase } from '../../lib/supabase';
+import { recordTransaction } from '../../lib/inventoryTransaction';
 import { Search, Pencil, Check, X, Package, ClipboardList } from 'lucide-react';
 
 interface InventoryRow {
@@ -118,6 +119,19 @@ export default function InventoryManage() {
         .eq('warehouse_id', warehouseId)
         .eq('sku_id', row.sku_id);
       if (updErr) throw updErr;
+
+      // 수불부 트랜잭션 기록
+      const diff = editQty - row.quantity;
+      if (diff !== 0) {
+        recordTransaction({
+          warehouseId: warehouseId!,
+          skuId: row.sku_id,
+          txType: '재고조정',
+          quantity: Math.abs(diff),
+          source: 'manual',
+          memo: `재고수정: ${row.quantity} → ${editQty}`,
+        });
+      }
 
       // activity_log 기록 (실패해도 재고 수정에 영향 없음)
       supabase.auth.getUser().then(({ data: userData }) => {

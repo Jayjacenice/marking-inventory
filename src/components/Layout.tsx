@@ -18,6 +18,7 @@ import {
   Warehouse,
   Truck,
   Package,
+  BookOpen,
 } from 'lucide-react';
 
 interface NavItem {
@@ -68,6 +69,12 @@ const navItems: NavItem[] = [
     label: '계정 관리',
     path: '/admin/users',
     icon: <Users size={18} />,
+    roles: ['admin'],
+  },
+  {
+    label: '재고 수불부',
+    path: '/admin/stock-ledger',
+    icon: <BookOpen size={18} />,
     roles: ['admin'],
   },
   {

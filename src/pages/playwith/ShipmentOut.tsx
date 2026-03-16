@@ -1,5 +1,6 @@
 import { type ChangeEvent, useEffect, useRef, useState } from 'react';
 import { supabase } from '../../lib/supabase';
+import { recordTransaction } from '../../lib/inventoryTransaction';
 import { useStaleGuard } from '../../hooks/useStaleGuard';
 import { AlertTriangle, CheckCircle, ChevronLeft, ChevronRight, Download, FileUp, Truck, Info } from 'lucide-react';
 import { generateTemplate, parseQtyExcel } from '../../lib/excelUtils';
@@ -314,6 +315,17 @@ export default function ShipmentOut({ currentUser }: { currentUser: AppUser }) {
               .from('inventory')
               .update({ quantity: Math.max(0, (inv as any).quantity - item.shipQty) })
               .eq('id', (inv as any).id);
+          }
+          // 수불부 트랜잭션 기록
+          if (item.shipQty > 0) {
+            await recordTransaction({
+              warehouseId: (warehouse as any).id,
+              skuId: item.finishedSkuId,
+              txType: '출고',
+              quantity: item.shipQty,
+              source: 'system',
+              memo: `출고확인 (작업지시서 ${selectedWo.download_date})`,
+            });
           }
           step++;
         }

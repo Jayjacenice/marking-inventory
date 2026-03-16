@@ -1,5 +1,6 @@
 import { type ChangeEvent, useEffect, useRef, useState } from 'react';
 import { supabase } from '../../lib/supabase';
+import { recordTransaction } from '../../lib/inventoryTransaction';
 import { useStaleGuard } from '../../hooks/useStaleGuard';
 import { AlertTriangle, CheckCircle, ChevronLeft, ChevronRight, Download, FileUp } from 'lucide-react';
 import { generateTemplate, parseQtyExcel } from '../../lib/excelUtils';
@@ -309,6 +310,15 @@ export default function ReceiptCheck({ currentUser }: { currentUser: AppUser }) 
               { onConflict: 'warehouse_id,sku_id' }
             );
           if (upsertErr) throw upsertErr;
+          // 수불부 트랜잭션 기록
+          await recordTransaction({
+            warehouseId: pwWhId,
+            skuId: item.skuId,
+            txType: '입고',
+            quantity: item.actualQty,
+            source: 'system',
+            memo: `입고확인 (작업지시서 ${selectedOrder.download_date})`,
+          });
         }
       }
 

@@ -79,6 +79,23 @@ export interface AppUser {
   name: string;
 }
 
+export type TxType = '입고' | '출고' | '반품' | '재고조정';
+export type TxSource = 'cj_excel' | 'system' | 'manual';
+
+export interface InventoryTransaction {
+  id: string;
+  warehouse_id: string;
+  sku_id: string;
+  tx_type: TxType;
+  quantity: number;
+  source: TxSource;
+  memo: string | null;
+  tx_date: string;
+  created_at: string;
+  warehouse?: Warehouse;
+  sku?: Sku;
+}
+
 export type ActionType = 'shipment_confirm' | 'receipt_check' | 'marking_work' | 'shipment_out' | 'shipment_cancel_request' | 'shipment_cancel_approved' | 'shipment_modify_request' | 'shipment_modify_approved';
 
 export interface ActivityLog {
