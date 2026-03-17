@@ -329,8 +329,6 @@ export default function Downloads() {
     if (!previews.step3) return;
     setDownloading(true);
     try {
-      const playwithWh = warehouses['플레이위즈'];
-      const cjWh = warehouses['CJ창고'];
       const today = new Date().toISOString().split('T')[0];
 
       if (previews.step3.mAdj.length > 0) {
@@ -369,7 +367,6 @@ export default function Downloads() {
     if (!previews.step4) return;
     setDownloading(true);
     try {
-      const playwithWh = warehouses['플레이위즈'];
       const cjWh = warehouses['CJ창고'];
       const today = new Date().toISOString().split('T')[0];
 

@@ -322,12 +322,11 @@ async function rollbackMarkingInternal(
         memo: `마킹작업 구성품 차감 (${fSkuId})`,
       });
     }
-    for (const fSkuId of finishedSkuIds) {
-      await deleteSystemTransactions({
-        warehouseId: pwWhId,
-        memo: '마킹작업 완성품 증가',
-      });
-    }
+    // 완성품 증가 트랜잭션은 memo가 동일하므로 1회 호출로 전체 삭제
+    await deleteSystemTransactions({
+      warehouseId: pwWhId,
+      memo: '마킹작업 완성품 증가',
+    });
 
     onProgress?.(5, totalSteps, '마킹 기록 삭제 중...');
 
