@@ -12,8 +12,10 @@ import type { AppUser } from '../../types';
 import {
   AlertTriangle,
   CheckCircle,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
+  ChevronUp,
   Clock,
   Download,
   Eye,
@@ -33,6 +35,16 @@ interface MarkingItem {
   markedQty: number;      // 누적 완료 수량
   orderedQty: number;     // 주문 수량
   isCarryOver: boolean;   // 이월 작업건 여부
+}
+
+interface UnavailableItem {
+  lineId: string;
+  finishedSkuId: string;
+  skuName: string;
+  orderedQty: number;
+  receivedQty: number;
+  markedQty: number;
+  reason: string; // "미입고" | "유니폼 재고 부족" | "마킹자재 재고 부족"
 }
 
 interface ActiveOrder {
@@ -75,6 +87,10 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
 
   // BOM 맵: finishedSkuId → [{ componentSkuId, quantity }]
   const [bomMap, setBomMap] = useState<Record<string, { componentSkuId: string; quantity: number }[]>>({});
+
+  // 작업 불가 리스트
+  const [unavailableItems, setUnavailableItems] = useState<UnavailableItem[]>([]);
+  const [showUnavailable, setShowUnavailable] = useState(false);
 
   // 내일 날짜 계산
   const tomorrowDate = (() => {
@@ -145,7 +161,7 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
       // BOM + daily_marking 병렬 조회 (둘 다 1단계 lines 결과에만 의존)
       const markingSkuIds = ((lines || []) as any[]).map((l: any) => l.finished_sku_id as string);
 
-      const [bomResult, markingResult] = await Promise.all([
+      const [bomResult, markingResult, whResult] = await Promise.all([
         // BOM 로드 (마킹 시 구성품 재고 변경용)
         supabase
           .from('bom')
@@ -158,6 +174,12 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
               .select('work_order_line_id, completed_qty, date')
               .in('work_order_line_id', lineIds)
           : Promise.resolve({ data: [] as any[], error: null }),
+        // 플레이위즈 창고 ID 조회
+        supabase
+          .from('warehouse')
+          .select('id')
+          .eq('name', '플레이위즈')
+          .maybeSingle(),
       ]);
 
       if (bomResult.error) throw bomResult.error;
@@ -170,6 +192,27 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
         bMap[b.finished_sku_id].push({ componentSkuId: b.component_sku_id, quantity: b.quantity });
       }
       setBomMap(bMap);
+
+      // 플레이위즈 창고의 구성품 재고 조회
+      const pwWhId = (whResult.data as any)?.id;
+      const allComponentSkuIds = new Set<string>();
+      for (const comps of Object.values(bMap)) {
+        for (const c of comps) allComponentSkuIds.add(c.componentSkuId);
+      }
+      const componentSkuArr = Array.from(allComponentSkuIds);
+
+      let inventoryMap: Record<string, number> = {};
+      if (pwWhId && componentSkuArr.length > 0) {
+        const { data: invData } = await supabase
+          .from('inventory')
+          .select('sku_id, quantity')
+          .eq('warehouse_id', pwWhId)
+          .in('sku_id', componentSkuArr);
+        if (isStale()) return;
+        for (const inv of (invData || []) as any[]) {
+          inventoryMap[inv.sku_id] = inv.quantity || 0;
+        }
+      }
 
       const allMarkings = (markingResult.data || []) as any[];
 
@@ -185,19 +228,62 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
         }
       }
 
-      const markingItems: MarkingItem[] = ((lines || []) as any[])
-        .filter((line) => line.received_qty - line.marked_qty > 0)
-        .map((line) => ({
-          lineId: line.id,
-          finishedSkuId: line.finished_sku_id,
-          skuName: line.finished_sku?.sku_name || line.finished_sku_id,
-          barcode: line.finished_sku?.barcode || null,
-          remainingQty: line.received_qty - line.marked_qty,
-          todayQty: todayMap[line.id] || 0,
-          markedQty: line.marked_qty,
-          orderedQty: line.ordered_qty,
-          isCarryOver: hasHistory.has(line.id) || (line.marked_qty > 0 && line.marked_qty < line.received_qty),
-        }));
+      const markingItems: MarkingItem[] = [];
+      const unavailable: UnavailableItem[] = [];
+
+      for (const line of (lines || []) as any[]) {
+        const skuName = line.finished_sku?.sku_name || line.finished_sku_id;
+
+        // 미입고: received_qty = 0
+        if (line.received_qty === 0) {
+          unavailable.push({
+            lineId: line.id,
+            finishedSkuId: line.finished_sku_id,
+            skuName,
+            orderedQty: line.ordered_qty,
+            receivedQty: line.received_qty,
+            markedQty: line.marked_qty,
+            reason: '미입고',
+          });
+          continue;
+        }
+
+        const remaining = line.received_qty - line.marked_qty;
+        if (remaining <= 0) continue; // 이미 완료
+
+        // 구성품 재고 부족 판별
+        const comps = bMap[line.finished_sku_id] || [];
+        const shortage = comps.find((c) => {
+          const inv = inventoryMap[c.componentSkuId] || 0;
+          return inv < c.quantity * remaining;
+        });
+
+        if (shortage) {
+          const reason = shortage.componentSkuId.includes('MK') ? '마킹자재 재고 부족' : '유니폼 재고 부족';
+          unavailable.push({
+            lineId: line.id,
+            finishedSkuId: line.finished_sku_id,
+            skuName,
+            orderedQty: line.ordered_qty,
+            receivedQty: line.received_qty,
+            markedQty: line.marked_qty,
+            reason,
+          });
+        } else {
+          // 작업 가능
+          markingItems.push({
+            lineId: line.id,
+            finishedSkuId: line.finished_sku_id,
+            skuName,
+            barcode: line.finished_sku?.barcode || null,
+            remainingQty: remaining,
+            todayQty: todayMap[line.id] || 0,
+            markedQty: line.marked_qty,
+            orderedQty: line.ordered_qty,
+            isCarryOver: hasHistory.has(line.id) || (line.marked_qty > 0 && line.marked_qty < line.received_qty),
+          });
+        }
+      }
 
       // 정렬: 이월 우선 → 나머지
       markingItems.sort((a, b) => {
@@ -206,6 +292,7 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
       });
 
       setItems(markingItems);
+      setUnavailableItems(unavailable);
     } catch (e: any) {
       if (!isStale()) setError(`마킹 데이터 조회 실패: ${e.message || '알 수 없는 오류'}`);
     } finally {
@@ -1112,6 +1199,40 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
               </div>
             )}
           </div>
+
+          {/* 작업 불가 리스트 (접이식 아코디언) */}
+          {unavailableItems.length > 0 && (
+            <div className="mt-4">
+              <button
+                onClick={() => setShowUnavailable(!showUnavailable)}
+                className="w-full flex items-center justify-between px-4 py-3 bg-gray-100 border border-gray-200 rounded-xl text-sm font-medium text-gray-600 hover:bg-gray-150 transition-colors"
+              >
+                <div className="flex items-center gap-2">
+                  <AlertTriangle size={14} className="text-yellow-600" />
+                  <span>작업 불가 ({unavailableItems.length}종)</span>
+                </div>
+                <div className="flex items-center gap-1 text-gray-400">
+                  <span className="text-xs">{showUnavailable ? '접기' : '펼치기'}</span>
+                  {showUnavailable ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+                </div>
+              </button>
+              {showUnavailable && (
+                <div className="space-y-2 mt-2">
+                  {unavailableItems.map((item) => (
+                    <div key={item.lineId} className="bg-gray-50 border border-gray-200 rounded-lg px-4 py-3 opacity-60">
+                      <div className="flex items-center justify-between">
+                        <p className="text-sm font-medium text-gray-600">{item.skuName}</p>
+                        <span className="text-xs px-2 py-0.5 rounded-full bg-red-100 text-red-700">{item.reason}</span>
+                      </div>
+                      <p className="text-xs text-gray-400 mt-1">
+                        주문 {item.orderedQty} / 입고 {item.receivedQty} / 마킹완료 {item.markedQty}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
 
           {items.length > 0 && (
             <>
