@@ -22,6 +22,16 @@ interface ActiveOrder {
   lineCount: number;
 }
 
+interface RemainingLine {
+  id: string;
+  finishedSkuId: string;
+  skuName: string;
+  orderedQty: number;
+  sentQty: number;
+  remaining: number;
+  newOrdered: number;
+}
+
 interface RequestDetail {
   workOrderId: string;
   workOrderDate: string;
@@ -55,6 +65,10 @@ export default function Dashboard() {
   const [markingSessions, setMarkingSessions] = useState<MarkingSession[]>([]);
   const [selectedSessions, setSelectedSessions] = useState<Set<string>>(new Set());
   const [rollbackMode, setRollbackMode] = useState<'all' | 'select'>('all');
+
+  // 잔량 관리 모달
+  const [remainingModal, setRemainingModal] = useState<{woId: string; woDate: string; lines: RemainingLine[]} | null>(null);
+  const [savingRemaining, setSavingRemaining] = useState(false);
 
   useEffect(() => {
     loadData();
@@ -392,6 +406,74 @@ export default function Dashboard() {
     }
   };
 
+  // ── 잔량 관리 ──
+  const openRemainingModal = async (wo: ActiveOrder) => {
+    try {
+      const { data: lines } = await supabase
+        .from('work_order_line')
+        .select('id, finished_sku_id, ordered_qty, sent_qty, finished_sku:sku!work_order_line_finished_sku_id_fkey(sku_name)')
+        .eq('work_order_id', wo.id);
+
+      const remainingLines = (lines || [])
+        .filter((l: any) => (l.ordered_qty || 0) > (l.sent_qty || 0))
+        .map((l: any) => ({
+          id: l.id,
+          finishedSkuId: l.finished_sku_id,
+          skuName: l.finished_sku?.sku_name || l.finished_sku_id,
+          orderedQty: l.ordered_qty,
+          sentQty: l.sent_qty || 0,
+          remaining: l.ordered_qty - (l.sent_qty || 0),
+          newOrdered: l.ordered_qty,
+        }));
+
+      setRemainingModal({ woId: wo.id, woDate: wo.downloadDate, lines: remainingLines });
+    } catch (e: any) {
+      setError(`잔량 조회 실패: ${e.message}`);
+    }
+  };
+
+  const saveRemaining = async () => {
+    if (!remainingModal) return;
+    setSavingRemaining(true);
+    try {
+      for (const line of remainingModal.lines) {
+        if (line.newOrdered !== line.orderedQty) {
+          await supabase.from('work_order_line')
+            .update({ ordered_qty: line.newOrdered })
+            .eq('id', line.id);
+        }
+      }
+      const { data: { user } } = await supabase.auth.getUser();
+      await supabase.from('activity_log').insert({
+        user_id: user?.id || '',
+        action_type: 'shipment_modify_approved',
+        work_order_id: remainingModal.woId,
+        action_date: new Date().toISOString().slice(0, 10),
+        summary: {
+          items: remainingModal.lines
+            .filter(l => l.newOrdered !== l.orderedQty)
+            .map(l => ({ skuId: l.finishedSkuId, skuName: l.skuName, before: l.orderedQty, after: l.newOrdered })),
+          reason: '관리자 잔량 수정',
+        },
+      });
+      setRemainingModal(null);
+      setSuccessMsg('잔량이 수정되었습니다.');
+      await loadData();
+    } catch (e: any) {
+      alert('저장 실패: ' + e.message);
+    } finally {
+      setSavingRemaining(false);
+    }
+  };
+
+  const cancelAllRemaining = () => {
+    if (!remainingModal) return;
+    setRemainingModal({
+      ...remainingModal,
+      lines: remainingModal.lines.map(l => ({ ...l, newOrdered: l.sentQty }))
+    });
+  };
+
   const statusColor: Record<string, string> = {
     업로드됨: 'bg-gray-100 text-gray-700',
     이관준비: 'bg-yellow-100 text-yellow-700',
@@ -534,6 +616,15 @@ export default function Dashboard() {
                           >
                             <Eye size={12} />
                             처리
+                          </button>
+                        )}
+                        {['이관중', '입고확인완료', '마킹중', '마킹완료'].includes(wo.status) && (
+                          <button
+                            onClick={() => openRemainingModal(wo)}
+                            className="px-2.5 py-1 text-xs font-medium text-amber-600 bg-amber-50 rounded-lg hover:bg-amber-100 flex items-center gap-1"
+                            title="잔량 수정"
+                          >
+                            잔량 수정
                           </button>
                         )}
                         <button
@@ -917,6 +1008,72 @@ export default function Dashboard() {
                 {rolling ? '처리 중...' : rollbackMode === 'select' && selectedSessions.size > 0
                   ? `선택 ${selectedSessions.size}건 롤백`
                   : '삭제 확인'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {/* ── 잔량 관리 모달 ── */}
+      {remainingModal && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl shadow-xl max-w-lg w-full max-h-[80vh] overflow-hidden">
+            <div className="px-5 py-4 border-b border-gray-100">
+              <h3 className="text-lg font-bold text-gray-900">잔량 관리</h3>
+              <p className="text-sm text-gray-500">{remainingModal.woDate} 작업지시서</p>
+            </div>
+
+            <div className="px-5 py-4 space-y-3 max-h-[50vh] overflow-y-auto">
+              {/* 전체 취소 버튼 */}
+              <button onClick={() => cancelAllRemaining()} className="text-xs text-red-600 underline">
+                잔량 전체 취소 (발송 불필요 처리)
+              </button>
+
+              {remainingModal.lines.length === 0 ? (
+                <p className="text-sm text-gray-400 text-center py-4">잔량이 있는 항목이 없습니다.</p>
+              ) : (
+                remainingModal.lines.map((line, idx) => (
+                  <div key={line.id} className="border border-gray-200 rounded-lg p-3">
+                    <p className="text-sm font-medium text-gray-800">{line.skuName}</p>
+                    <p className="text-xs text-gray-400">{line.finishedSkuId}</p>
+                    <div className="flex items-center gap-3 mt-2">
+                      <span className="text-xs text-gray-500">발송완료: {line.sentQty}</span>
+                      <span className="text-xs text-gray-500">잔량: {line.newOrdered - line.sentQty}</span>
+                      <div className="flex items-center gap-1">
+                        <span className="text-xs text-gray-600">주문수량:</span>
+                        <input
+                          type="number"
+                          min={line.sentQty}
+                          max={999}
+                          value={line.newOrdered}
+                          onChange={(e) => {
+                            const val = Math.max(line.sentQty, Number(e.target.value));
+                            setRemainingModal(prev => prev ? {
+                              ...prev,
+                              lines: prev.lines.map((l, i) => i === idx ? { ...l, newOrdered: val } : l)
+                            } : null);
+                          }}
+                          className="w-16 text-center text-sm border rounded px-2 py-1"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+
+            <div className="px-5 py-4 border-t border-gray-100 flex justify-end gap-2">
+              <button
+                onClick={() => setRemainingModal(null)}
+                className="px-4 py-2 text-sm text-gray-600 border rounded-lg hover:bg-gray-50"
+              >
+                닫기
+              </button>
+              <button
+                onClick={saveRemaining}
+                disabled={savingRemaining || remainingModal.lines.every(l => l.newOrdered === l.orderedQty)}
+                className="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50"
+              >
+                {savingRemaining ? '저장 중...' : '저장'}
               </button>
             </div>
           </div>

@@ -87,17 +87,18 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
     setLoading(true);
     setError(null);
     try {
-      // 이관준비 (발송 대기) + 잔량 있는 이관중 (추가 발송 가능)
-      const [pendResult, transitResult, recentResult] = await Promise.all([
+      // 이관준비 (발송 대기) + 잔량 있는 진행중 건 (추가 발송 가능)
+      const [pendResult, progressResult, recentResult] = await Promise.all([
         supabase
           .from('work_order')
           .select('id, download_date, status')
           .eq('status', '이관준비')
           .order('uploaded_at', { ascending: false }),
+        // 이관중 ~ 마킹완료까지 잔량 체크 (입고/마킹 진행 중에도 추가 발송 가능)
         supabase
           .from('work_order')
           .select('id, download_date, status, work_order_line(ordered_qty, sent_qty)')
-          .eq('status', '이관중')
+          .in('status', ['이관중', '입고확인완료', '마킹중', '마킹완료'])
           .order('uploaded_at', { ascending: false }),
         supabase
           .from('work_order')
@@ -106,30 +107,31 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
           .order('uploaded_at', { ascending: false }),
       ]);
       if (pendResult.error) throw pendResult.error;
-      if (transitResult.error) throw transitResult.error;
+      if (progressResult.error) throw progressResult.error;
       if (recentResult.error) throw recentResult.error;
       if (isStale()) return;
 
-      // 잔량 있는 이관중 건 필터 (ordered_qty > sent_qty인 라인이 있으면 잔량 있음)
-      const transitWithRemaining = ((transitResult.data || []) as any[]).filter((wo: any) => {
+      // 잔량 있는 건 필터 (ordered_qty > sent_qty인 라인이 있으면 잔량 있음)
+      const withRemaining = ((progressResult.data || []) as any[]).filter((wo: any) => {
         const lines = wo.work_order_line || [];
         return lines.some((l: any) => (l.ordered_qty || 0) > (l.sent_qty || 0));
       }).map((wo: any) => ({ id: wo.id, download_date: wo.download_date, status: wo.status }));
 
       // 잔량 없는 이관중 건 = 최근 발송 완료 건
-      const transitDone = ((transitResult.data || []) as any[]).filter((wo: any) => {
+      const done = ((progressResult.data || []) as any[]).filter((wo: any) => {
         const lines = wo.work_order_line || [];
         return !lines.some((l: any) => (l.ordered_qty || 0) > (l.sent_qty || 0));
-      }).map((wo: any) => ({ id: wo.id, download_date: wo.download_date, status: wo.status }));
+      }).filter((wo: any) => wo.status === '이관중')
+        .map((wo: any) => ({ id: wo.id, download_date: wo.download_date, status: wo.status }));
 
-      // 발송 대기 = 이관준비 + 잔량 있는 이관중
+      // 발송 대기 = 이관준비 + 잔량 있는 진행중 건
       const orders = [
         ...((pendResult.data || []) as ActiveWorkOrder[]),
-        ...(transitWithRemaining as ActiveWorkOrder[]),
+        ...(withRemaining as ActiveWorkOrder[]),
       ];
       setWorkOrders(orders);
       setRecentShipped([
-        ...(transitDone as ActiveWorkOrder[]),
+        ...(done as ActiveWorkOrder[]),
         ...((recentResult.data || []) as ActiveWorkOrder[]),
       ]);
 
