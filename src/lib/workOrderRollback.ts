@@ -497,7 +497,7 @@ export async function deleteWorkOrderCompletely(
       }
     }
 
-    // 2. 남은 데이터 정리
+    // 2. 남은 데이터 정리 (롤백 스킵 시에도 잔존 트랜잭션 확실히 제거)
     phase++;
     onProgress?.(phase, totalPhases, '데이터 정리 중...');
 
@@ -510,6 +510,50 @@ export async function deleteWorkOrderCompletely(
       for (let i = 0; i < lineIds.length; i += 500) {
         const batch = lineIds.slice(i, i + 500);
         await supabaseAdmin.from('daily_marking').delete().in('work_order_line_id', batch);
+      }
+    }
+
+    // 잔존 inventory_transaction 강제 정리 (memo에 작업지시서 날짜 포함된 모든 트랜잭션)
+    // 롤백이 스킵되어 트랜잭션이 남은 경우를 대비한 안전망
+    const memoPattern = `%작업지시서 ${downloadDate}%`;
+    const { data: remainingTx } = await supabaseAdmin
+      .from('inventory_transaction')
+      .select('id, warehouse_id, sku_id, tx_type, quantity')
+      .eq('source', 'system')
+      .like('memo', memoPattern);
+
+    if (remainingTx && remainingTx.length > 0) {
+      // inventory 역반영
+      const reverseDelta = new Map<string, { warehouseId: string; delta: number }>();
+      for (const tx of remainingTx as any[]) {
+        const key = `${tx.warehouse_id}|${tx.sku_id}`;
+        if (!reverseDelta.has(key)) reverseDelta.set(key, { warehouseId: tx.warehouse_id, delta: 0 });
+        const entry = reverseDelta.get(key)!;
+        switch (tx.tx_type) {
+          case '입고': case '반품': case '재고조정': case '마킹입고':
+            entry.delta -= tx.quantity; break;
+          case '출고': case '마킹출고':
+            entry.delta += tx.quantity; break;
+        }
+      }
+
+      // inventory 업데이트 (배치)
+      for (const [key, entry] of reverseDelta) {
+        const [whId, skuId] = key.split('|');
+        const { data: inv } = await supabaseAdmin.from('inventory')
+          .select('quantity').eq('warehouse_id', whId).eq('sku_id', skuId).maybeSingle();
+        const newQty = Math.max(0, ((inv as any)?.quantity || 0) + entry.delta);
+        await supabaseAdmin.from('inventory').upsert(
+          { warehouse_id: whId, sku_id: skuId, quantity: newQty },
+          { onConflict: 'warehouse_id,sku_id' }
+        );
+      }
+
+      // 트랜잭션 삭제
+      const txIds = remainingTx.map((t: any) => t.id);
+      for (let i = 0; i < txIds.length; i += 500) {
+        const batch = txIds.slice(i, i + 500);
+        await supabaseAdmin.from('inventory_transaction').delete().in('id', batch);
       }
     }
 
