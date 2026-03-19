@@ -131,6 +131,9 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
 
   // 작업 불가 리스트
   const [unavailableItems, setUnavailableItems] = useState<UnavailableItem[]>([]);
+
+  // 초과 마킹 후 작업불가 알림
+  const [unavailableAlert, setUnavailableAlert] = useState<{ skuName: string; reason: string; needed: number; available: number }[]>([]);
   const [showUnavailable, setShowUnavailable] = useState(false);
 
   // 내일 날짜 계산
@@ -1117,7 +1120,7 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
       await selectOrder(selectedOrder);
       setSaved(true);
 
-      // 슬랙 알림
+      // 슬랙 알림 (마킹 실적)
       const savedItems = items.filter((i) => (i.todayQty || 0) > 0);
       notifySlack({
         action: '마킹작업',
@@ -1125,6 +1128,59 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
         date: selectedOrder.download_date,
         items: savedItems.map((i) => ({ name: i.skuName, qty: i.todayQty || 0 })),
       }).catch(() => {});
+
+      // 초과 마킹으로 인한 작업불가 품목 감지
+      try {
+        const { data: currentInv } = await supabase
+          .from('inventory')
+          .select('sku_id, quantity')
+          .eq('warehouse_id', pwWhId);
+        const invMap: Record<string, number> = {};
+        for (const inv of (currentInv || []) as any[]) {
+          invMap[inv.sku_id] = inv.quantity;
+        }
+
+        // 미완료 라인 확인 (marked_qty < received_qty)
+        const { data: freshLines } = await supabase
+          .from('work_order_line')
+          .select('finished_sku_id, ordered_qty, marked_qty, received_qty, needs_marking')
+          .eq('work_order_id', selectedOrder.id);
+
+        const newlyUnavail: { skuName: string; reason: string; needed: number; available: number }[] = [];
+        for (const line of (freshLines || []) as any[]) {
+          if (!line.needs_marking) continue;
+          const remaining = (line.received_qty || 0) - (line.marked_qty || 0);
+          if (remaining <= 0) continue;
+
+          const comps = bomMap[line.finished_sku_id] || [];
+          for (const comp of comps) {
+            const needed = comp.quantity * remaining;
+            const available = invMap[comp.componentSkuId] || 0;
+            if (available < needed) {
+              const { data: skuInfo } = await supabase.from('sku').select('sku_name').eq('sku_id', line.finished_sku_id).maybeSingle();
+              newlyUnavail.push({
+                skuName: (skuInfo as any)?.sku_name || line.finished_sku_id,
+                reason: comp.componentSkuId.includes('MK') ? '마킹자재 부족' : '유니폼 부족',
+                needed,
+                available,
+              });
+              break; // 하나라도 부족하면 작업불가
+            }
+          }
+        }
+
+        if (newlyUnavail.length > 0) {
+          setUnavailableAlert(newlyUnavail);
+          // 슬랙 작업불가 알림
+          notifySlack({
+            action: '작업불가알림' as any,
+            user: currentUser.name || currentUser.email,
+            date: selectedOrder.download_date,
+            items: newlyUnavail.map((i) => ({ name: `${i.skuName} (${i.reason})`, qty: i.needed - i.available })),
+            message: `초과 마킹으로 ${newlyUnavail.length}종 작업 불가`,
+          }).catch(() => {});
+        }
+      } catch { /* 작업불가 감지 실패해도 마킹 저장은 성공 */ }
     } catch (e: any) {
       setError(`마킹 저장 실패: ${e.message || '알 수 없는 오류'}. 잠시 후 다시 시도해주세요.`);
     } finally {
@@ -1627,6 +1683,43 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
                 className="flex-1 py-2.5 bg-orange-500 text-white rounded-lg text-sm font-medium hover:bg-orange-600 transition-colors"
               >
                 그래도 저장
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 작업불가 알림 모달 */}
+      {unavailableAlert.length > 0 && (
+        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-xl max-w-md w-full overflow-hidden">
+            <div className="px-6 py-5 border-b border-gray-100 bg-red-50">
+              <div className="flex items-center gap-2">
+                <AlertTriangle size={20} className="text-red-600" />
+                <h3 className="text-lg font-bold text-red-800">⚠️ 재고 부족 알림</h3>
+              </div>
+              <p className="text-sm text-red-600 mt-1">초과 마킹으로 아래 품목의 구성품이 부족합니다</p>
+            </div>
+            <div className="px-6 py-4 max-h-60 overflow-y-auto space-y-2">
+              {unavailableAlert.map((item, i) => (
+                <div key={i} className="bg-red-50 rounded-lg p-3">
+                  <p className="text-sm font-medium text-gray-900">{item.skuName}</p>
+                  <p className="text-xs text-gray-500 mt-1">
+                    사유: <span className="font-medium text-red-600">{item.reason}</span>
+                  </p>
+                  <p className="text-xs text-gray-500">
+                    필요 <span className="font-medium">{item.needed}개</span> / 보유 <span className="font-bold text-red-600">{item.available}개</span>
+                    {' '}→ 부족 <span className="font-bold text-red-700">{item.needed - item.available}개</span>
+                  </p>
+                </div>
+              ))}
+            </div>
+            <div className="px-6 py-4 border-t border-gray-100">
+              <button
+                onClick={() => setUnavailableAlert([])}
+                className="w-full py-2.5 bg-red-500 text-white rounded-lg text-sm font-medium hover:bg-red-600 transition-colors"
+              >
+                확인
               </button>
             </div>
           </div>

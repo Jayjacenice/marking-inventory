@@ -15,7 +15,9 @@ export interface RecordTxParams {
 /** 재고 변동 1건 기록 */
 export async function recordTransaction(params: RecordTxParams): Promise<void> {
   if (params.quantity === 0) return;
-  if (params.quantity < 0 && params.txType !== '재고조정') return;
+  // 마킹 관련 타입은 음수 허용 (롤백/수정 시 역방향 트랜잭션 필요)
+  const allowNegative = ['재고조정', '마킹출고', '마킹입고'].includes(params.txType);
+  if (params.quantity < 0 && !allowNegative) return;
   const { error } = await supabase.from('inventory_transaction').insert({
     warehouse_id: params.warehouseId,
     sku_id: params.skuId,

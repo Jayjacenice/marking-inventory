@@ -432,27 +432,47 @@ export default function ReceiptCheck({ currentUser }: { currentUser: AppUser }) 
       const stepsTotal = lineBatches + itemBatches + 4;
       let progressStep = 1;
 
-      // ── received_qty 업데이트 (차수별 누적) ──
+      // ── received_qty 업데이트 (차수별 누적, consume 패턴) ──
+      // 같은 구성품을 여러 finished_sku가 공유할 때 중복 할당 방지
+      const consumeMap: Record<string, number> = {};
+      for (const item of items) {
+        consumeMap[item.skuId] = (consumeMap[item.skuId] || 0) + item.actualQty;
+      }
+
+      // 라인별 thisWaveQty를 미리 계산 (consumeMap에서 순차 차감)
+      const lineWaveQtyMap: Record<string, number> = {};
+      for (const line of lineList) {
+        let thisWaveQty: number;
+        if (line.needs_marking) {
+          const boms = bomData.filter((b: any) => b.finished_sku_id === line.finished_sku_id);
+          const uniformComp = boms.find((b: any) => !b.component_sku_id?.includes('MK'));
+          const comp = uniformComp || boms[0];
+          if (comp) {
+            const available = consumeMap[comp.component_sku_id] || 0;
+            const maxFromComp = Math.floor(available / (comp.quantity || 1));
+            const remaining = Math.max(0, (line.ordered_qty || 0) - (line.received_qty || 0));
+            thisWaveQty = Math.min(maxFromComp, remaining);
+            // 소비: 사용한 만큼 차감
+            for (const b of boms) {
+              consumeMap[b.component_sku_id] = Math.max(0, (consumeMap[b.component_sku_id] || 0) - thisWaveQty * (b.quantity || 1));
+            }
+          } else {
+            thisWaveQty = 0;
+          }
+        } else {
+          thisWaveQty = consumeMap[line.finished_sku_id] ?? 0;
+          consumeMap[line.finished_sku_id] = Math.max(0, (consumeMap[line.finished_sku_id] || 0) - thisWaveQty);
+        }
+        lineWaveQtyMap[line.id] = thisWaveQty;
+      }
+
       setSaveProgress({ current: 2, total: stepsTotal, step: '입고 수량 처리 중...' });
       for (let i = 0; i < lineList.length; i += BATCH) {
         const batch = lineList.slice(i, i + BATCH);
         progressStep++;
         setSaveProgress({ current: progressStep, total: stepsTotal, step: `입고 수량 처리 중... (${Math.min(i + BATCH, lineList.length)} / ${lineList.length})` });
         await Promise.all(batch.map((line: any) => {
-          let thisWaveQty: number;
-          if (line.needs_marking) {
-            // BOM 유니폼 구성품의 actualQty로 역산
-            const boms = bomData.filter((b: any) => b.finished_sku_id === line.finished_sku_id);
-            const uniformComp = boms.find((b: any) => !b.component_sku_id?.includes('MK'));
-            if (uniformComp) {
-              thisWaveQty = Math.round((actualMap[uniformComp.component_sku_id] || 0) / (uniformComp.quantity || 1));
-            } else {
-              const anyComp = boms[0];
-              thisWaveQty = anyComp ? Math.round((actualMap[anyComp.component_sku_id] || 0) / (anyComp.quantity || 1)) : 0;
-            }
-          } else {
-            thisWaveQty = actualMap[line.finished_sku_id] ?? 0;
-          }
+          const thisWaveQty = lineWaveQtyMap[line.id] || 0;
           const newReceivedQty = (line.received_qty || 0) + thisWaveQty;
           return supabase.from('work_order_line').update({ received_qty: newReceivedQty }).eq('id', line.id);
         }));
