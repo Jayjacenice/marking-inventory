@@ -1,5 +1,4 @@
 import { type ChangeEvent, useEffect, useRef, useState } from 'react';
-import * as XLSX from 'xlsx';
 import { supabase } from '../../lib/supabase';
 import { recordTransactionBatch, deleteSystemTransactions } from '../../lib/inventoryTransaction';
 import type { RecordTxParams } from '../../lib/inventoryTransaction';
@@ -17,7 +16,6 @@ import {
   ChevronLeft,
   ChevronRight,
   ChevronUp,
-  Clock,
   Download,
   Eye,
   FileUp,
@@ -38,17 +36,6 @@ interface MarkingItem {
   orderedQty: number;     // 주문 수량
   sentQty: number;        // 발송(출고) 수량
   isCarryOver: boolean;   // 이월 작업건 여부
-}
-
-interface OverprocessedItem {
-  finishedSkuId: string;
-  skuName: string;
-  orderedQty: number;
-  markedQty: number;
-  sentQty: number;
-  overQty: number;        // 과처리 수량 = marked - ordered
-  resolvedQty: number;    // 출고로 해소된 수량
-  unresolvedQty: number;  // 미해소 수량
 }
 
 interface OverprocessWarning {
@@ -107,15 +94,11 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
   const [selectedOrder, setSelectedOrder] = useState<ActiveOrder | null>(null);
   const [items, setItems] = useState<MarkingItem[]>([]);
   const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
-  const [saveProgress, setSaveProgress] = useState<{ current: number; total: number; step: string } | null>(null);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   // 엑셀 관련
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const [uploadComparison, setUploadComparison] = useState<{ rows: ComparisonRow[]; unmatched: string[] } | null>(null);
-  const [xlsxError, setXlsxError] = useState<string | null>(null);
 
   // 날짜 관리
   const today = new Date().toISOString().split('T')[0];
@@ -129,12 +112,10 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
   // BOM 맵: finishedSkuId → [{ componentSkuId, quantity }]
   const [bomMap, setBomMap] = useState<Record<string, { componentSkuId: string; quantity: number }[]>>({});
 
-  // 작업 불가 리스트
-  const [unavailableItems, setUnavailableItems] = useState<UnavailableItem[]>([]);
+  // 작업 불가 리스트 (아코디언 캐시 woItemsCache.unavailable 로 관리)
 
   // 초과 마킹 후 작업불가 알림
   const [unavailableAlert, setUnavailableAlert] = useState<{ skuName: string; reason: string; needed: number; available: number }[]>([]);
-  const [showUnavailable, setShowUnavailable] = useState(false);
 
   // 내일 날짜 계산
   const tomorrowDate = (() => {
@@ -146,8 +127,6 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
   const isTomorrow = selectedDate === tomorrowDate;
 
   // 과처리 관련
-  const [overprocessedItems, setOverprocessedItems] = useState<OverprocessedItem[]>([]);
-  const [showOverprocessed, setShowOverprocessed] = useState(false);
   const [showOverprocessWarning, setShowOverprocessWarning] = useState(false);
   const [overprocessWarnings, setOverprocessWarnings] = useState<OverprocessWarning[]>([]);
   const [pendingSaveType, setPendingSaveType] = useState<'single' | 'merged' | null>(null);
@@ -207,8 +186,6 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
     setLoading(true);
     setSaved(false);
     setError(null);
-    setUploadComparison(null);
-    setXlsxError(null);
     setSelectedDate(today);
     setHistoryItems([]);
     try {
@@ -296,30 +273,10 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
 
       const markingItems: MarkingItem[] = [];
       const unavailable: UnavailableItem[] = [];
-      const overprocessed: OverprocessedItem[] = [];
 
       for (const line of (lines || []) as any[]) {
         const skuName = line.finished_sku?.sku_name || line.finished_sku_id;
         const sentQty = line.sent_qty || 0;
-
-        // 과처리 판별 (완료 여부와 무관하게 체크)
-        if (line.marked_qty > line.ordered_qty) {
-          const overQty = line.marked_qty - line.ordered_qty;
-          const resolvedQty = Math.min(sentQty, overQty);
-          const unresolvedQty = overQty - resolvedQty;
-          if (unresolvedQty > 0) {
-            overprocessed.push({
-              finishedSkuId: line.finished_sku_id,
-              skuName,
-              orderedQty: line.ordered_qty,
-              markedQty: line.marked_qty,
-              sentQty,
-              overQty,
-              resolvedQty,
-              unresolvedQty,
-            });
-          }
-        }
 
         // 미입고: received_qty = 0
         if (line.received_qty === 0) {
@@ -380,8 +337,6 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
       });
 
       setItems(markingItems);
-      setUnavailableItems(unavailable);
-      setOverprocessedItems(overprocessed);
       // 아코디언 캐시에 저장
       setWoItemsCache((prev) => ({ ...prev, [wo.id]: { items: markingItems, unavailable } }));
     } catch (e: any) {
@@ -408,7 +363,6 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
     if (woItemsCache[wo.id]) {
       setSelectedOrder(wo);
       setItems(woItemsCache[wo.id].items);
-      setUnavailableItems(woItemsCache[wo.id].unavailable);
       return;
     }
 
@@ -465,10 +419,8 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
           }
         }
 
-        const merged = Object.values(mergedMap).sort((a, b) => {
-          if (a.isCarryOver !== b.isCarryOver) return a.isCarryOver ? -1 : 1;
-          return 0;
-        });
+        // 작업 많은 순(remainingQty 내림차순) 정렬
+        const merged = Object.values(mergedMap).sort((a, b) => b.remainingQty - a.remainingQty);
 
         setMergedItems(merged);
         return currentCache;
@@ -807,18 +759,6 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
     }
   };
 
-  // ── 수량 변경 ──
-
-  const handleQtyChange = (lineId: string, value: number) => {
-    setItems((prev) =>
-      prev.map((item) => {
-        if (item.lineId !== lineId) return item;
-        const clamped = Math.max(0, Math.min(value, item.remainingQty));
-        return { ...item, todayQty: clamped };
-      })
-    );
-  };
-
   // ── 엑셀 양식 다운로드 ──
 
   const handleDownloadTemplate = () => {
@@ -852,8 +792,6 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
   const handleExcelUpload = async (e: ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    setXlsxError(null);
-    setUploadComparison(null);
     try {
       const result = await parseQtyExcel(
         file,
@@ -870,63 +808,17 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
         )
       );
 
-      // 비교 패널
-      const compRows: ComparisonRow[] = items
-        .map((item) => ({
-          skuId: item.finishedSkuId,
-          skuName: item.skuName,
-          expected: item.remainingQty,
-          uploaded: matchMap.get(item.finishedSkuId) || 0,
-          diff: (matchMap.get(item.finishedSkuId) || 0) - item.remainingQty,
-        }))
-        .filter((r) => r.uploaded > 0 || matchMap.has(r.skuId));
-
-      if (compRows.length > 0) {
-        setUploadComparison({ rows: compRows, unmatched: result.unmatched });
-      } else if (result.unmatched.length > 0) {
-        setXlsxError(`매칭 실패: ${result.unmatched.join(', ')}`);
+      if (result.unmatched.length > 0) {
+        setError(`매칭 실패: ${result.unmatched.join(', ')}`);
       }
     } catch (err: any) {
-      setXlsxError(err.message || '엑셀 파싱 실패');
+      setError(err.message || '엑셀 파싱 실패');
     } finally {
       if (fileInputRef.current) fileInputRef.current.value = '';
     }
   };
 
-  // ── 집계 ──
-
-  const carryOverItems = items.filter((i) => i.isCarryOver);
-  const totalRemaining = items.reduce((s, i) => s + i.remainingQty, 0);
-  const unavailableRemaining = unavailableItems.reduce((s, i) => s + Math.max(0, (i.receivedQty || 0) - (i.markedQty || 0)), 0);
-  const grandTotalRemaining = totalRemaining + unavailableRemaining;
-  const totalToday = items.reduce((s, i) => s + i.todayQty, 0);
-  const allComplete = items.every((item) => item.todayQty >= item.remainingQty);
-
   // ── 저장 ──
-
-  // ── 과처리 검사 (저장 전) ──
-  const checkOverprocess = () => {
-    const activeItems = items.filter((item) => item.todayQty > 0);
-    const warnings: OverprocessWarning[] = [];
-    for (const item of activeItems) {
-      const newMarkedQty = item.markedQty + item.todayQty;
-      if (newMarkedQty > item.orderedQty) {
-        warnings.push({
-          skuName: item.skuName,
-          orderedQty: item.orderedQty,
-          newMarkedQty,
-          overQty: newMarkedQty - item.orderedQty,
-        });
-      }
-    }
-    if (warnings.length > 0) {
-      setOverprocessWarnings(warnings);
-      setPendingSaveType('single');
-      setShowOverprocessWarning(true);
-    } else {
-      handleSave();
-    }
-  };
 
   const checkMergedOverprocess = () => {
     const activeItems = mergedItems.filter((item) => item.todayQty > 0);
@@ -960,16 +852,12 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
 
   const handleSave = async () => {
     if (!selectedOrder) return;
-    setSaving(true);
-    setSaveProgress(null);
     setError(null);
     try {
       const activeItems = items.filter((item) => item.todayQty > 0);
       if (activeItems.length === 0) return;
-      const totalSteps = 6;
 
       // ── 1단계: 데이터 일괄 조회 (병렬) ──
-      setSaveProgress({ current: 1, total: totalSteps, step: '데이터 조회 중...' });
       const lineIds = activeItems.map((item) => item.lineId);
 
       const [dmResult, lineResult, whResult] = await Promise.all([
@@ -995,7 +883,6 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
       });
 
       // ── 2단계: daily_marking 배치 처리 ──
-      setSaveProgress({ current: 2, total: totalSteps, step: '마킹 기록 저장 중...' });
       const toInsert = diffs.filter((d) => !d.existing);
       const toUpdate = diffs.filter((d) => d.existing);
 
@@ -1022,7 +909,6 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
       }
 
       // ── 3단계: work_order_line marked_qty 배치 업데이트 ──
-      setSaveProgress({ current: 3, total: totalSteps, step: 'marked_qty 업데이트 중...' });
       for (let i = 0; i < diffs.length; i += BATCH) {
         const batch = diffs.slice(i, i + BATCH);
         await Promise.all(batch.map((d) => {
@@ -1034,7 +920,6 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
       }
 
       // ── 4단계: 재고 트랜잭션 일괄 기록 (recordTransactionBatch) ──
-      setSaveProgress({ current: 4, total: totalSteps, step: '재고 반영 중...' });
       if (pwWhId) {
         const txRows: RecordTxParams[] = [];
         for (const d of diffs) {
@@ -1066,7 +951,6 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
       }
 
       // ── 5단계: 상태 업데이트 ──
-      setSaveProgress({ current: 5, total: totalSteps, step: '완료 상태 업데이트 중...' });
       const { data: allLines, error: allLinesErr } = await supabase
         .from('work_order_line')
         .select('received_qty, marked_qty, needs_marking')
@@ -1084,7 +968,6 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
       if (statusErr) throw statusErr;
 
       // ── 6단계: Activity log (중복 방지: 같은 날 같은 WO면 update) ──
-      setSaveProgress({ current: 6, total: totalSteps, step: '완료 처리 중...' });
       try {
         const logItems = activeItems.map((item) => ({
           skuId: item.finishedSkuId, skuName: item.skuName, completedQty: item.todayQty,
@@ -1184,9 +1067,6 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
       } catch { /* 작업불가 감지 실패해도 마킹 저장은 성공 */ }
     } catch (e: any) {
       setError(`마킹 저장 실패: ${e.message || '알 수 없는 오류'}. 잠시 후 다시 시도해주세요.`);
-    } finally {
-      setSaving(false);
-      setSaveProgress(null);
     }
   };
 
@@ -1390,44 +1270,6 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
     );
   }
 
-  // ── 아이템 행 렌더링 ──
-
-  const renderItemRow = (item: MarkingItem) => {
-    const isComplete = item.todayQty >= item.remainingQty;
-    return (
-      <div
-        key={item.lineId}
-        className={`px-5 py-3.5 flex items-center gap-3 ${isComplete ? 'bg-green-50' : ''}`}
-      >
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2">
-            <p className="text-sm font-medium text-gray-900 truncate">{item.skuName}</p>
-          </div>
-          <div className="flex items-center gap-2 mt-0.5">
-            <span className="text-xs text-blue-600">잔여 {item.remainingQty}개</span>
-            {item.isCarryOver && (
-              <span className="text-[10px] px-1.5 py-0.5 bg-orange-100 text-orange-600 rounded-full">이월</span>
-            )}
-          </div>
-        </div>
-        <div className="flex items-center gap-2 flex-shrink-0">
-          <input
-            type="number"
-            min="0"
-            max={item.remainingQty}
-            value={item.todayQty}
-            onChange={(e) => handleQtyChange(item.lineId, Number(e.target.value))}
-            className={`w-20 border rounded-lg px-2 py-1.5 text-sm text-right focus:outline-none focus:ring-2 focus:ring-blue-500 ${
-              isComplete ? 'border-green-300 bg-green-50' : 'border-gray-300'
-            }`}
-          />
-          <span className="text-sm text-gray-500">/ {item.remainingQty}개</span>
-          {isComplete && <CheckCircle size={16} className="text-green-500" />}
-        </div>
-      </div>
-    );
-  };
-
   // ── 렌더링 ──
 
   return (
@@ -1476,6 +1318,41 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
           </button>
         </div>
       </div>
+
+      {/* ── 양식 버튼 (날짜 바로 아래) ── */}
+      {isToday && selectedOrder && (
+        <div className="flex gap-2">
+          <button
+            onClick={handleDownloadTemplate}
+            className="flex items-center gap-1.5 px-3 py-2 text-sm border border-gray-300 rounded-lg text-gray-600 hover:bg-gray-50 transition-colors"
+          >
+            <Download size={15} />
+            양식 다운로드
+          </button>
+          <button
+            onClick={handleDownloadAvailable}
+            disabled={items.length === 0}
+            className="flex items-center gap-1.5 px-3 py-2 text-sm border border-green-300 rounded-lg text-green-600 hover:bg-green-50 transition-colors disabled:opacity-50"
+          >
+            <Download size={15} />
+            작업 가능 양식
+          </button>
+          <button
+            onClick={() => fileInputRef.current?.click()}
+            className="flex items-center gap-1.5 px-3 py-2 text-sm border border-blue-300 rounded-lg text-blue-600 hover:bg-blue-50 transition-colors"
+          >
+            <FileUp size={15} />
+            엑셀 업로드
+          </button>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".xlsx,.xls,.csv"
+            className="hidden"
+            onChange={handleExcelUpload}
+          />
+        </div>
+      )}
 
       {/* ── 내일 이월 미리보기 모드 ── */}
       {isTomorrow && (
@@ -1820,80 +1697,49 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
                     </div>
                   </div>
 
-                  {/* 작업 목록 */}
+                  {/* 작업 목록 — 통합 (작업 많은 순) */}
                   <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
-                    {mergedCarryOverItems.length > 0 && (
-                      <>
-                        <div className="px-5 py-2.5 bg-orange-50 border-b border-orange-100">
-                          <span className="text-xs font-semibold text-orange-700">이월 작업건 ({mergedCarryOverItems.length})</span>
-                        </div>
-                        <div className="divide-y divide-gray-50">
-                          {mergedCarryOverItems.map((item) => (
-                            <div key={item.finishedSkuId} className={`px-5 py-3.5 flex items-center gap-3 ${item.todayQty >= item.remainingQty ? 'bg-green-50' : ''}`}>
-                              <div className="flex-1 min-w-0">
-                                <p className="text-sm font-medium text-gray-900 truncate">{item.skuName}</p>
-                                <p className="text-xs text-gray-400 mt-0.5">
-                                  잔여 {item.remainingQty}개 {item.markedQty > 0 && `(누적완료 ${item.markedQty}개)`}
-                                </p>
-                                {item.sources.length > 1 && (
-                                  <div className="mt-1 flex flex-wrap gap-1">
-                                    {item.sources.map((src) => (
-                                      <span key={src.lineId} className="text-[10px] bg-gray-100 text-gray-500 px-1 rounded">
-                                        {src.woDate.slice(5)} ({src.availableQty})
-                                      </span>
-                                    ))}
-                                  </div>
-                                )}
-                              </div>
-                              <div className="flex items-center gap-2 flex-shrink-0">
-                                <input type="number" min="0" max={item.remainingQty} value={item.todayQty}
-                                  onChange={(e) => handleMergedQtyChange(item.finishedSkuId, Number(e.target.value))}
-                                  className={`w-20 border rounded-lg px-2 py-1.5 text-sm text-right focus:outline-none focus:ring-2 focus:ring-indigo-500 ${
-                                    item.todayQty >= item.remainingQty ? 'border-green-300 bg-green-50' : 'border-gray-300'
-                                  }`} />
-                                <span className="text-sm text-gray-500">/ {item.remainingQty}개</span>
-                                {item.todayQty >= item.remainingQty && <CheckCircle size={16} className="text-green-500" />}
-                              </div>
+                    <div className="px-5 py-2.5 bg-blue-50 border-b border-blue-100">
+                      <span className="text-xs font-semibold text-blue-700">
+                        작업 목록 ({mergedItems.length}건)
+                        {mergedCarryOverItems.length > 0 && (
+                          <span className="ml-2 text-orange-600 font-normal">* 지연 {mergedCarryOverItems.length}건 포함</span>
+                        )}
+                      </span>
+                    </div>
+                    <div className="divide-y divide-gray-50">
+                      {mergedItems.map((item) => (
+                        <div key={item.finishedSkuId} className={`px-5 py-3.5 flex items-center gap-3 ${item.todayQty >= item.remainingQty ? 'bg-green-50' : ''}`}>
+                          <div className="flex-1 min-w-0">
+                            <p className="text-sm font-medium text-gray-900 truncate">{item.skuName}</p>
+                            <div className="flex items-center gap-2 mt-0.5">
+                              <span className="text-xs text-blue-600">잔여 {item.remainingQty}개</span>
+                              {item.isCarryOver && (
+                                <span className="text-[10px] px-1.5 py-0.5 bg-orange-100 text-orange-600 rounded-full">지연작업</span>
+                              )}
                             </div>
-                          ))}
-                        </div>
-                      </>
-                    )}
-                    {mergedNewItems.length > 0 && (
-                      <>
-                        <div className="px-5 py-2.5 bg-blue-50 border-b border-blue-100">
-                          <span className="text-xs font-semibold text-blue-700">신규 작업건 ({mergedNewItems.length})</span>
-                        </div>
-                        <div className="divide-y divide-gray-50">
-                          {mergedNewItems.map((item) => (
-                            <div key={item.finishedSkuId} className={`px-5 py-3.5 flex items-center gap-3 ${item.todayQty >= item.remainingQty ? 'bg-green-50' : ''}`}>
-                              <div className="flex-1 min-w-0">
-                                <p className="text-sm font-medium text-gray-900 truncate">{item.skuName}</p>
-                                <p className="text-xs text-gray-400 mt-0.5">잔여 {item.remainingQty}개</p>
-                                {item.sources.length > 1 && (
-                                  <div className="mt-1 flex flex-wrap gap-1">
-                                    {item.sources.map((src) => (
-                                      <span key={src.lineId} className="text-[10px] bg-gray-100 text-gray-500 px-1 rounded">
-                                        {src.woDate.slice(5)} ({src.availableQty})
-                                      </span>
-                                    ))}
-                                  </div>
-                                )}
+                            {item.sources.length > 1 && (
+                              <div className="mt-1 flex flex-wrap gap-1">
+                                {item.sources.map((src) => (
+                                  <span key={src.lineId} className="text-[10px] bg-gray-100 text-gray-500 px-1 rounded">
+                                    {src.woDate.slice(5)} ({src.availableQty})
+                                  </span>
+                                ))}
                               </div>
-                              <div className="flex items-center gap-2 flex-shrink-0">
-                                <input type="number" min="0" max={item.remainingQty} value={item.todayQty}
-                                  onChange={(e) => handleMergedQtyChange(item.finishedSkuId, Number(e.target.value))}
-                                  className={`w-20 border rounded-lg px-2 py-1.5 text-sm text-right focus:outline-none focus:ring-2 focus:ring-indigo-500 ${
-                                    item.todayQty >= item.remainingQty ? 'border-green-300 bg-green-50' : 'border-gray-300'
-                                  }`} />
-                                <span className="text-sm text-gray-500">/ {item.remainingQty}개</span>
-                                {item.todayQty >= item.remainingQty && <CheckCircle size={16} className="text-green-500" />}
-                              </div>
-                            </div>
-                          ))}
+                            )}
+                          </div>
+                          <div className="flex items-center gap-2 flex-shrink-0">
+                            <input type="number" min="0" max={item.remainingQty} value={item.todayQty}
+                              onChange={(e) => handleMergedQtyChange(item.finishedSkuId, Number(e.target.value))}
+                              className={`w-20 border rounded-lg px-2 py-1.5 text-sm text-right focus:outline-none focus:ring-2 focus:ring-indigo-500 ${
+                                item.todayQty >= item.remainingQty ? 'border-green-300 bg-green-50' : 'border-gray-300'
+                              }`} />
+                            <span className="text-sm text-gray-500">/ {item.remainingQty}개</span>
+                            {item.todayQty >= item.remainingQty && <CheckCircle size={16} className="text-green-500" />}
+                          </div>
                         </div>
-                      </>
-                    )}
+                      ))}
+                    </div>
                   </div>
 
                   {/* 진행 바 */}
@@ -1986,22 +1832,16 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
         );
       })}
 
-      {/* ── 오늘 작업 모드 ── */}
-      {isToday && saved ? (
+      {/* ── 저장 완료 메시지 ── */}
+      {isToday && saved && (
         <div className="bg-green-50 border border-green-200 rounded-xl p-5">
           <div className="flex items-center gap-3 mb-2">
             <CheckCircle size={24} className="text-green-600" />
             <p className="font-semibold text-green-900">오늘 작업이 저장되었습니다</p>
           </div>
           <p className="text-sm text-green-700">
-            총 <strong>{totalToday}개</strong> 완료. 관리자 화면에서 STEP 3 양식을 다운로드하세요.
+            관리자 화면에서 STEP 3 양식을 다운로드하세요.
           </p>
-          {!allComplete && (
-            <p className="text-sm text-yellow-700 mt-2 flex items-center gap-1">
-              <Clock size={14} />
-              미완료 수량은 내일 작업 목록에 자동으로 표시됩니다
-            </p>
-          )}
           <button
             onClick={() => setSaved(false)}
             className="mt-3 text-sm text-green-700 underline"
@@ -2009,251 +1849,8 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
             수량 수정하기
           </button>
         </div>
-      ) : isToday && (
-        <>
-          {/* 엑셀 버튼 */}
-          <div className="flex gap-2">
-            <button
-              onClick={handleDownloadTemplate}
-              className="flex items-center gap-1.5 px-3 py-2 text-sm border border-gray-300 rounded-lg text-gray-600 hover:bg-gray-50 transition-colors"
-            >
-              <Download size={15} />
-              양식 다운로드
-            </button>
-            <button
-              onClick={handleDownloadAvailable}
-              disabled={items.length === 0}
-              className="flex items-center gap-1.5 px-3 py-2 text-sm border border-green-300 rounded-lg text-green-600 hover:bg-green-50 transition-colors disabled:opacity-50"
-            >
-              <Download size={15} />
-              작업 가능 양식 다운로드
-            </button>
-            <button
-              onClick={() => fileInputRef.current?.click()}
-              className="flex items-center gap-1.5 px-3 py-2 text-sm border border-blue-300 rounded-lg text-blue-600 hover:bg-blue-50 transition-colors"
-            >
-              <FileUp size={15} />
-              엑셀 업로드
-            </button>
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept=".xlsx,.xls,.csv"
-              className="hidden"
-              onChange={handleExcelUpload}
-            />
-          </div>
-
-          {/* 엑셀 파싱 에러 */}
-          {xlsxError && (
-            <div className="flex items-start gap-2 bg-red-50 border border-red-200 rounded-xl p-3">
-              <AlertTriangle size={16} className="text-red-600 flex-shrink-0 mt-0.5" />
-              <p className="text-sm text-red-800">{xlsxError}</p>
-            </div>
-          )}
-
-          {/* 업로드 비교 패널 */}
-          {uploadComparison && (
-            <ComparisonPanel
-              rows={uploadComparison.rows}
-              unmatched={uploadComparison.unmatched}
-              onClose={() => setUploadComparison(null)}
-            />
-          )}
-
-          {/* 총 수량 합계 */}
-          <div className="bg-white rounded-xl shadow-sm border border-gray-100 px-5 py-3">
-            <div className="flex flex-wrap gap-x-6 gap-y-1 text-sm">
-              <div className="flex gap-1">
-                <span className="text-gray-500">총 잔여:</span>
-                <span className="font-semibold text-gray-900">{grandTotalRemaining}개</span>
-                {unavailableRemaining > 0 && (
-                  <span className="text-yellow-600 text-xs">(작업가능 {totalRemaining} + 불가 {unavailableRemaining})</span>
-                )}
-              </div>
-              {carryOverItems.length > 0 && (
-                <div className="flex gap-1">
-                  <span className="text-orange-600">이월:</span>
-                  <span className="font-semibold text-orange-700">{carryOverItems.reduce((s, i) => s + i.remainingQty, 0)}개</span>
-                </div>
-              )}
-              <div className="flex gap-1">
-                <span className="text-gray-500">오늘 입력:</span>
-                <span className="font-bold text-blue-700">{totalToday}개</span>
-              </div>
-            </div>
-          </div>
-
-          {/* 작업 불가 리스트 — 작업 목록 위에 배치 (기본 접힘) */}
-          {unavailableItems.length > 0 && (
-            <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
-              <div className="px-4 py-3 bg-yellow-50 border-b border-yellow-200 flex items-center justify-between">
-                <button
-                  onClick={() => setShowUnavailable(!showUnavailable)}
-                  className="flex items-center gap-2 text-sm font-medium text-yellow-800"
-                >
-                  <AlertTriangle size={14} className="text-yellow-600" />
-                  <span>작업 불가 ({unavailableItems.length}종)</span>
-                  {showUnavailable ? <ChevronUp size={14} className="text-yellow-500" /> : <ChevronDown size={14} className="text-yellow-500" />}
-                </button>
-                <button
-                  onClick={() => {
-                    const wsData = [
-                      ['SKU ID', '상품명', '사유', '주문수량', '입고수량', '마킹완료수량'],
-                      ...unavailableItems.map((item) => [
-                        item.finishedSkuId, item.skuName, item.reason,
-                        item.orderedQty, item.receivedQty, item.markedQty,
-                      ]),
-                    ];
-                    const ws = XLSX.utils.aoa_to_sheet(wsData);
-                    ws['!cols'] = [{ wch: 22 }, { wch: 40 }, { wch: 18 }, { wch: 10 }, { wch: 10 }, { wch: 12 }];
-                    const wb = XLSX.utils.book_new();
-                    XLSX.utils.book_append_sheet(wb, ws, '작업불가목록');
-                    XLSX.writeFile(wb, `작업불가목록_${new Date().toISOString().slice(0, 10)}.xlsx`);
-                  }}
-                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs border border-yellow-300 rounded-lg text-yellow-700 hover:bg-yellow-100 transition-colors"
-                >
-                  <Download size={13} />
-                  다운로드
-                </button>
-              </div>
-              {showUnavailable && (
-                <div className="divide-y divide-gray-50">
-                  {unavailableItems.map((item) => (
-                    <div key={item.lineId} className="px-4 py-3 flex items-center justify-between gap-3">
-                      <div className="flex-1 min-w-0">
-                        <p className="text-sm font-medium text-gray-700 leading-snug">{item.skuName}</p>
-                        <p className="text-xs text-gray-400 font-mono mt-0.5">{item.finishedSkuId}</p>
-                        <p className="text-xs text-gray-400 mt-0.5">
-                          주문 {item.orderedQty} / 입고 {item.receivedQty} / 마킹완료 {item.markedQty}
-                        </p>
-                      </div>
-                      <span className="text-xs px-2 py-1 rounded-full bg-red-100 text-red-700 whitespace-nowrap flex-shrink-0">{item.reason}</span>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* 과처리 현황 */}
-          {overprocessedItems.length > 0 && (
-            <div className="bg-white rounded-xl shadow-sm border border-red-200 overflow-hidden">
-              <div className="px-4 py-3 bg-red-50 border-b border-red-200 flex items-center justify-between">
-                <button
-                  onClick={() => setShowOverprocessed(!showOverprocessed)}
-                  className="flex items-center gap-2 text-sm font-medium text-red-800"
-                >
-                  <AlertTriangle size={14} className="text-red-600" />
-                  <span>과처리 현황 ({overprocessedItems.length}종)</span>
-                  {showOverprocessed ? <ChevronUp size={14} className="text-red-500" /> : <ChevronDown size={14} className="text-red-500" />}
-                </button>
-                <span className="text-xs font-medium text-red-600">
-                  미해소 {overprocessedItems.reduce((s, i) => s + i.unresolvedQty, 0)}개
-                </span>
-              </div>
-              {showOverprocessed && (
-                <div className="divide-y divide-gray-50">
-                  {overprocessedItems.map((item) => (
-                    <div key={item.finishedSkuId} className="px-4 py-3 flex items-center justify-between gap-3">
-                      <div className="flex-1 min-w-0">
-                        <p className="text-sm font-medium text-gray-700 leading-snug">{item.skuName}</p>
-                        <p className="text-xs text-gray-400 mt-0.5">
-                          주문 {item.orderedQty}개 / 마킹완료 {item.markedQty}개
-                        </p>
-                        <div className="flex gap-2 mt-1">
-                          <span className="text-[10px] px-1.5 py-0.5 bg-green-100 text-green-700 rounded-full">
-                            정상 {item.orderedQty}개
-                          </span>
-                          <span className="text-[10px] px-1.5 py-0.5 bg-red-100 text-red-700 rounded-full">
-                            과처리 {item.overQty}개
-                          </span>
-                          {item.resolvedQty > 0 && (
-                            <span className="text-[10px] px-1.5 py-0.5 bg-gray-100 text-gray-600 rounded-full">
-                              출고해소 {item.resolvedQty}개
-                            </span>
-                          )}
-                        </div>
-                      </div>
-                      <span className="text-sm font-bold text-red-600 whitespace-nowrap">
-                        미해소 {item.unresolvedQty}개
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* 작업 목록 카드 — 통합 리스트 */}
-          <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
-            {items.length === 0 ? (
-              <div className="px-5 py-8 text-center text-gray-400 text-sm">
-                모든 마킹 작업이 완료되었습니다
-              </div>
-            ) : (
-              <div>
-                <div className="px-4 py-2.5 bg-blue-50 border-b border-blue-200 flex items-center gap-2">
-                  <span className="text-sm font-medium text-blue-800">
-                    작업 목록 ({items.length}건)
-                    {carryOverItems.length > 0 && (
-                      <span className="ml-2 text-orange-600 font-normal">
-                        * 이월 {carryOverItems.length}건 포함
-                      </span>
-                    )}
-                  </span>
-                </div>
-                <div className="divide-y divide-gray-50">
-                  {items.map(renderItemRow)}
-                </div>
-              </div>
-            )}
-
-            {items.length > 0 && (
-              <div className="px-5 py-3 bg-gray-50 border-t border-gray-100 flex items-center justify-between">
-                <p className="text-sm text-gray-600">물류센터 발송 합계:</p>
-                <p className="text-sm font-bold text-gray-900">{totalToday}개</p>
-              </div>
-            )}
-          </div>
-
-          {items.length > 0 && (
-            <>
-              <p className="text-xs text-center text-gray-400">
-                미완료 수량은 내일 자동으로 남습니다
-              </p>
-              {saving && (
-                <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 space-y-3">
-                  <p className="text-sm text-blue-700 font-medium text-center">
-                    {saveProgress?.step ?? '저장 중...'}
-                  </p>
-                  {saveProgress && (
-                    <>
-                      <div className="w-full bg-blue-200 rounded-full h-2.5 overflow-hidden">
-                        <div
-                          className="bg-blue-600 h-2.5 rounded-full transition-all duration-300"
-                          style={{ width: `${Math.round((saveProgress.current / saveProgress.total) * 100)}%` }}
-                        />
-                      </div>
-                      <p className="text-xs text-blue-500 text-center">
-                        {saveProgress.current} / {saveProgress.total}
-                        ({Math.round((saveProgress.current / saveProgress.total) * 100)}%)
-                      </p>
-                    </>
-                  )}
-                </div>
-              )}
-              <button
-                onClick={checkOverprocess}
-                disabled={saving || totalToday === 0}
-                className="w-full bg-blue-600 text-white py-3.5 rounded-xl font-semibold hover:bg-blue-700 disabled:opacity-60 transition-colors text-base"
-              >
-                {saving ? '저장 중...' : '오늘 작업 완료 저장'}
-              </button>
-            </>
-          )}
-        </>
       )}
     </div>
   );
 }
+
