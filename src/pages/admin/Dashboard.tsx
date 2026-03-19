@@ -14,7 +14,11 @@ import {
   type MarkingSession,
   type ProgressCallback,
 } from '../../lib/workOrderRollback';
-import type { WorkOrderStatus } from '../../types';
+import type { WorkOrderStatus, AppUser } from '../../types';
+
+interface DashboardProps {
+  currentUser: AppUser;
+}
 
 interface ActiveOrder {
   id: string;
@@ -44,7 +48,7 @@ interface RequestDetail {
   requestedAt: string;
 }
 
-export default function Dashboard() {
+export default function Dashboard({ currentUser }: DashboardProps) {
   const isStale = useStaleGuard();
   const [activeOrders, setActiveOrders] = useState<ActiveOrder[]>([]);
   const [loading, setLoading] = useState(true);
@@ -113,13 +117,11 @@ export default function Dashboard() {
     setRollbackProgress(null);
     setError(null);
     try {
-      const { data: { user } } = await supabase.auth.getUser();
-      const userId = user?.id || '';
       const onProgress: ProgressCallback = (current, total, step) => {
         setRollbackProgress({ current, total, step });
       };
       const result = await deleteWorkOrderCompletely(
-        wo.id, wo.downloadDate, wo.status as any, userId, onProgress
+        wo.id, wo.downloadDate, wo.status as any, currentUser.id, onProgress
       );
       if (!result.success) {
         setError(result.error || '삭제 실패');
@@ -150,8 +152,6 @@ export default function Dashboard() {
     setRollbackProgress(null);
     setError(null);
     try {
-      const { data: { user } } = await supabase.auth.getUser();
-      const userId = user?.id || '';
       const onProgress: ProgressCallback = (current, total, stepName) => {
         setRollbackProgress({ current, total, step: stepName });
       };
@@ -167,14 +167,14 @@ export default function Dashboard() {
               step: `[${dates[i]}] ${stepName}`,
             });
           };
-          const result = await executeRollback(step, manageOrder.id, manageOrder.date, userId, dateProgress, dates[i]);
+          const result = await executeRollback(step, manageOrder.id, manageOrder.date, currentUser.id, dateProgress, dates[i]);
           if (!result.success) {
             setError(result.error || '롤백 실패');
             return;
           }
         }
       } else {
-        const result = await executeRollback(step, manageOrder.id, manageOrder.date, userId, onProgress);
+        const result = await executeRollback(step, manageOrder.id, manageOrder.date, currentUser.id, onProgress);
         if (!result.success) {
           setError(result.error || '롤백 실패');
           return;
@@ -301,7 +301,7 @@ export default function Dashboard() {
 
       // 6. 승인 기록
       await supabase.from('activity_log').insert({
-        user_id: (await supabase.auth.getUser()).data.user?.id,
+        user_id: currentUser.id,
         action_type: 'shipment_cancel_approved',
         work_order_id: woId,
         action_date: new Date().toISOString().split('T')[0],
@@ -368,7 +368,7 @@ export default function Dashboard() {
 
       // 6. 승인 기록
       await supabase.from('activity_log').insert({
-        user_id: (await supabase.auth.getUser()).data.user?.id,
+        user_id: currentUser.id,
         action_type: 'shipment_modify_approved',
         work_order_id: woId,
         action_date: new Date().toISOString().split('T')[0],
@@ -446,9 +446,8 @@ export default function Dashboard() {
             .eq('id', line.id);
         }
       }
-      const { data: { user } } = await supabase.auth.getUser();
       await supabase.from('activity_log').insert({
-        user_id: user?.id || '',
+        user_id: currentUser.id,
         action_type: 'shipment_modify_approved',
         work_order_id: remainingModal.woId,
         action_date: new Date().toISOString().slice(0, 10),

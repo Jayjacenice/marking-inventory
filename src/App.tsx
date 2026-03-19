@@ -157,12 +157,12 @@ function AppContent() {
     >
       <Routes>
         {/* 관리자 */}
-        <Route path="/admin/dashboard" element={<Dashboard />} />
+        <Route path="/admin/dashboard" element={<Dashboard currentUser={user} />} />
         <Route path="/admin/workorder" element={<WorkOrderUpload />} />
         <Route path="/admin/downloads" element={<Downloads />} />
         <Route path="/admin/bom" element={<BOMManage />} />
         <Route path="/admin/inventory" element={<InventoryUpload />} />
-        <Route path="/admin/stock" element={<InventoryManage />} />
+        <Route path="/admin/stock" element={<InventoryManage currentUserId={user.id} />} />
         {/* currentUserId를 prop으로 전달 → UserManage 내 getSession() 중복 제거 */}
         <Route path="/admin/users" element={<UserManage currentUserId={user.id} />} />
         <Route path="/admin/history" element={<ActivityHistory />} />
