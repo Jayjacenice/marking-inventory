@@ -694,28 +694,44 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
           .eq('id', woId);
       }
 
-      // Step 6: Activity log + 재조회
+      // Step 6: Activity log (중복 방지: 같은 날 같은 WO면 update)
       setMergedSaveProgress({ current: 6, total: totalSteps, step: '완료 처리 중...' });
       for (const woId of woIds) {
         try {
           const woDate = orders.find((w) => w.id === woId)?.download_date || '';
           const woItems = diffs.filter((d) => d.workOrderId === woId);
-          await supabase.from('activity_log').insert({
-            user_id: currentUser.id,
-            action_type: 'marking_work',
-            work_order_id: woId,
-            action_date: today,
-            summary: {
-              mergedWork: true,
-              items: woItems.map((d) => ({
-                skuId: d.finishedSkuId,
-                skuName: mergedItems.find((m) => m.finishedSkuId === d.finishedSkuId)?.skuName || d.finishedSkuId,
-                completedQty: d.todayQty,
-              })),
-              totalQty: woItems.reduce((s, d) => s + d.todayQty, 0),
-              workOrderDate: woDate,
-            },
-          });
+          const logSummary = {
+            mergedWork: true,
+            items: woItems.map((d) => ({
+              skuId: d.finishedSkuId,
+              skuName: mergedItems.find((m) => m.finishedSkuId === d.finishedSkuId)?.skuName || d.finishedSkuId,
+              completedQty: d.todayQty,
+            })),
+            totalQty: woItems.reduce((s, d) => s + d.todayQty, 0),
+            workOrderDate: woDate,
+          };
+          const { data: existingLog } = await supabase
+            .from('activity_log')
+            .select('id')
+            .eq('user_id', currentUser.id)
+            .eq('action_type', 'marking_work')
+            .eq('work_order_id', woId)
+            .eq('action_date', today)
+            .order('created_at', { ascending: false })
+            .limit(1);
+          if (existingLog && existingLog.length > 0) {
+            await supabase.from('activity_log')
+              .update({ summary: logSummary })
+              .eq('id', (existingLog[0] as any).id);
+          } else {
+            await supabase.from('activity_log').insert({
+              user_id: currentUser.id,
+              action_type: 'marking_work',
+              work_order_id: woId,
+              action_date: today,
+              summary: logSummary,
+            });
+          }
         } catch (logErr) { console.warn('Activity log failed:', logErr); }
       }
 
@@ -1063,23 +1079,39 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
         .eq('id', selectedOrder.id);
       if (statusErr) throw statusErr;
 
-      // ── 6단계: Activity log + 재조회 ──
+      // ── 6단계: Activity log (중복 방지: 같은 날 같은 WO면 update) ──
       setSaveProgress({ current: 6, total: totalSteps, step: '완료 처리 중...' });
       try {
         const logItems = activeItems.map((item) => ({
           skuId: item.finishedSkuId, skuName: item.skuName, completedQty: item.todayQty,
         }));
-        await supabase.from('activity_log').insert({
-          user_id: currentUser.id,
-          action_type: 'marking_work',
-          work_order_id: selectedOrder.id,
-          action_date: today,
-          summary: {
-            items: logItems,
-            totalQty: logItems.reduce((s, i) => s + i.completedQty, 0),
-            workOrderDate: selectedOrder.download_date,
-          },
-        });
+        const logSummary = {
+          items: logItems,
+          totalQty: logItems.reduce((s, i) => s + i.completedQty, 0),
+          workOrderDate: selectedOrder.download_date,
+        };
+        const { data: existingLog } = await supabase
+          .from('activity_log')
+          .select('id')
+          .eq('user_id', currentUser.id)
+          .eq('action_type', 'marking_work')
+          .eq('work_order_id', selectedOrder.id)
+          .eq('action_date', today)
+          .order('created_at', { ascending: false })
+          .limit(1);
+        if (existingLog && existingLog.length > 0) {
+          await supabase.from('activity_log')
+            .update({ summary: logSummary })
+            .eq('id', (existingLog[0] as any).id);
+        } else {
+          await supabase.from('activity_log').insert({
+            user_id: currentUser.id,
+            action_type: 'marking_work',
+            work_order_id: selectedOrder.id,
+            action_date: today,
+            summary: logSummary,
+          });
+        }
       } catch (logErr) { console.warn('Activity log failed:', logErr); }
 
       await selectOrder(selectedOrder);
@@ -1236,8 +1268,12 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
         }
       }
 
-      // 7) activity_log 기록
+      // 7) activity_log: 원본 marking_work 로그 삭제 + 삭제 이력 기록
       onProgress(7, totalSteps, '이력 기록 중...');
+      await supabase.from('activity_log').delete()
+        .eq('work_order_id', selectedOrder.id)
+        .eq('action_type', 'marking_work')
+        .eq('action_date', selectedDate);
       await supabase.from('activity_log').insert({
         user_id: currentUser.id,
         action_type: 'delete_marking',

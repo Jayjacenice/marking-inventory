@@ -475,7 +475,11 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
         });
       }
 
-      // 4) activity_log에 삭제 이력 기록
+      // 4) activity_log: 원본 shipment_confirm 로그 삭제 + 삭제 이력 기록
+      await supabase.from('activity_log').delete()
+        .eq('work_order_id', historyWorkOrder.id)
+        .eq('action_type', 'shipment_confirm')
+        .eq('action_date', selectedDate);
       await supabase.from('activity_log').insert({
         user_id: currentUser.id,
         action_type: 'delete_shipment',

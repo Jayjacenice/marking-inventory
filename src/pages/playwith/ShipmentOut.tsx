@@ -109,9 +109,9 @@ export default function ShipmentOut({ currentUser }: { currentUser: AppUser }) {
       const lineList = (linesResult.data || []) as any[];
       const warehouseId = (warehouseResult.data as any)?.id;
 
-      // 2단계: daily_marking + inventory 병렬 조회 (각각 1단계 결과 필요)
+      // 2단계: daily_marking + inventory + 이전 출고 이력 병렬 조회
       const lineIds = lineList.map((l) => l.id);
-      const [markingsResult, inventoryResult] = await Promise.all([
+      const [markingsResult, inventoryResult, outLogResult] = await Promise.all([
         lineIds.length > 0
           ? supabase
               .from('daily_marking')
@@ -122,6 +122,11 @@ export default function ShipmentOut({ currentUser }: { currentUser: AppUser }) {
           .from('inventory')
           .select('sku_id, quantity')
           .eq('warehouse_id', warehouseId),
+        supabase
+          .from('activity_log')
+          .select('summary')
+          .eq('work_order_id', wo.id)
+          .eq('action_type', 'shipment_out'),
       ]);
       if (markingsResult.error) throw markingsResult.error;
       if (inventoryResult.error) throw inventoryResult.error;
@@ -138,6 +143,16 @@ export default function ShipmentOut({ currentUser }: { currentUser: AppUser }) {
       const inventoryMap: Record<string, number> = {};
       for (const inv of (inventoryData || []) as any[]) {
         inventoryMap[inv.sku_id] = inv.quantity;
+      }
+
+      // 이전 출고 수량 SKU별 합산
+      const previousShipped: Record<string, number> = {};
+      for (const log of (outLogResult.data || []) as any[]) {
+        for (const item of (log.summary?.items || []) as any[]) {
+          if (item.skuId && item.shipQty > 0) {
+            previousShipped[item.skuId] = (previousShipped[item.skuId] || 0) + item.shipQty;
+          }
+        }
       }
 
       // 4. finished_sku_id 수준 집계 (BOM 전개 없음!)
@@ -165,13 +180,21 @@ export default function ShipmentOut({ currentUser }: { currentUser: AppUser }) {
         itemMap[key].availableQty += qty;
       }
 
-      const shipmentItems: ShipmentOutItem[] = Object.values(itemMap).map((item) => ({
-        ...item,
-        shipQty: item.availableQty,
-        isShortage: item.finishedSkuId in inventoryMap
-          ? inventoryMap[item.finishedSkuId] < item.availableQty
-          : false,
-      }));
+      // 이전 출고분 차감 후 출고 가능 수량 계산
+      const shipmentItems: ShipmentOutItem[] = Object.values(itemMap)
+        .map((item) => {
+          const shipped = previousShipped[item.finishedSkuId] || 0;
+          const adjusted = Math.max(0, item.availableQty - shipped);
+          return {
+            ...item,
+            availableQty: adjusted,
+            shipQty: adjusted,
+            isShortage: item.finishedSkuId in inventoryMap
+              ? inventoryMap[item.finishedSkuId] < adjusted
+              : false,
+          };
+        })
+        .filter((item) => item.availableQty > 0);
 
       setItems(shipmentItems);
     } catch (e: any) {
@@ -388,14 +411,21 @@ export default function ShipmentOut({ currentUser }: { currentUser: AppUser }) {
         }
       }
 
-      // Activity log
+      // Activity log (wave 번호 계산 포함)
       try {
+        const { data: existingOutWaves } = await supabase
+          .from('activity_log').select('id')
+          .eq('work_order_id', selectedWo.id)
+          .eq('action_type', 'shipment_out');
+        const waveNum = (existingOutWaves || []).length + 1;
+
         await supabase.from('activity_log').insert({
           user_id: currentUser.id,
           action_type: 'shipment_out',
           work_order_id: selectedWo.id,
           action_date: new Date().toISOString().split('T')[0],
           summary: {
+            wave: waveNum,
             items: items.map((i) => ({ skuId: i.finishedSkuId, skuName: i.skuName, shipQty: i.shipQty })),
             totalQty: items.reduce((s, i) => s + i.shipQty, 0),
             workOrderDate: selectedWo.download_date,
