@@ -36,6 +36,26 @@ interface HistoryEntry {
   workOrderDate?: string;
 }
 
+interface ShipmentSource {
+  woId: string;
+  woDate: string;
+  woStatus: string;
+  availableQty: number;
+}
+
+interface MergedShipmentItem {
+  skuId: string;
+  skuName: string;
+  barcode: string | null;
+  orderedQty: number;
+  sentQty: number;
+  inventoryQty: number;
+  isShortage: boolean;
+  isMarking: boolean;
+  checked: boolean;
+  sources: ShipmentSource[];
+}
+
 export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser }) {
   const isStale = useStaleGuard();
   const [workOrders, setWorkOrders] = useState<ActiveWorkOrder[]>([]);
@@ -85,6 +105,16 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
   const [historyWorkOrder, setHistoryWorkOrder] = useState<{ id: string; date: string; status: string } | null>(null);
   const [showDeleteModal, setShowDeleteModal] = useState(false);
   const [deleting, setDeleting] = useState(false);
+
+  // 전체 발송대기 통합 뷰
+  const [mergedExpanded, setMergedExpanded] = useState(false);
+  const [mergedItems, setMergedItems] = useState<MergedShipmentItem[]>([]);
+  const [mergedLoading, setMergedLoading] = useState(false);
+  const [mergedConfirming, setMergedConfirming] = useState(false);
+  const [mergedConfirmProgress, setMergedConfirmProgress] = useState<{ current: number; total: number; step: string } | null>(null);
+  const [mergedUploadComparison, setMergedUploadComparison] = useState<{ rows: ComparisonRow[]; unmatched: string[] } | null>(null);
+  const [showMergedConfirmModal, setShowMergedConfirmModal] = useState(false);
+  const mergedFileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     loadPendingOrders();
@@ -531,6 +561,406 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
       setXlsxError(err.message || '파일 처리 실패');
     }
     if (fileInputRef.current) fileInputRef.current.value = '';
+  };
+
+  // ── 전체 발송대기 통합 뷰 ──
+  const buildMergedItems = async () => {
+    setMergedLoading(true);
+    setError(null);
+    try {
+      // 날짜순 정렬 (오름차순)
+      const sorted = [...workOrders].sort((a, b) => a.download_date.localeCompare(b.download_date));
+
+      // 캐시에 없는 WO를 병렬 선조회
+      const uncached = sorted.filter((wo) => !woItemsCache[wo.id]);
+      if (uncached.length > 0) {
+        await Promise.all(uncached.map((wo) => selectOrder(wo)));
+      }
+
+      // 최신 캐시 읽기 (selectOrder가 setState를 사용하므로 직접 참조)
+      // setState는 비동기이므로 woItemsCache를 직접 읽을 수 없음 → 콜백에서 처리
+      setWoItemsCache((currentCache) => {
+        const mergedMap: Record<string, MergedShipmentItem> = {};
+
+        for (const wo of sorted) {
+          const woItems = currentCache[wo.id];
+          if (!woItems) continue;
+          for (const item of woItems) {
+            if (!mergedMap[item.skuId]) {
+              mergedMap[item.skuId] = {
+                skuId: item.skuId,
+                skuName: item.skuName,
+                barcode: item.barcode,
+                orderedQty: 0,
+                sentQty: 0,
+                inventoryQty: item.inventoryQty,
+                isShortage: false,
+                isMarking: item.isMarking,
+                checked: true,
+                sources: [],
+              };
+            }
+            mergedMap[item.skuId].orderedQty += item.orderedQty;
+            mergedMap[item.skuId].sources.push({
+              woId: wo.id,
+              woDate: wo.download_date,
+              woStatus: wo.status || '이관준비',
+              availableQty: item.orderedQty,
+            });
+          }
+        }
+
+        // sentQty = orderedQty, shortage 계산
+        const merged = Object.values(mergedMap).map((m) => ({
+          ...m,
+          sentQty: m.orderedQty,
+          isShortage: m.inventoryQty < m.orderedQty,
+        }));
+
+        setMergedItems(merged);
+        return currentCache; // 캐시는 변경 없이 반환
+      });
+    } catch (e: any) {
+      setError(`통합 뷰 데이터 조회 실패: ${e.message || '알 수 없는 오류'}`);
+    } finally {
+      setMergedLoading(false);
+    }
+  };
+
+  const toggleMergedAccordion = async () => {
+    if (mergedExpanded) {
+      setMergedExpanded(false);
+      return;
+    }
+    setMergedExpanded(true);
+    // 개별 WO 아코디언 접기
+    setExpandedWoIds(new Set());
+    setSelectedWo(null);
+    await buildMergedItems();
+  };
+
+  // 통합 뷰 체크박스
+  const toggleMergedCheck = (skuId: string) => {
+    setMergedItems((prev) =>
+      prev.map((item) =>
+        item.skuId === skuId ? { ...item, checked: !item.checked } : item
+      )
+    );
+  };
+  const toggleMergedAll = (checked: boolean) => {
+    setMergedItems((prev) => prev.map((item) => ({ ...item, checked })));
+  };
+  const mergedCheckedItems = mergedItems.filter((i) => i.checked);
+  const mergedAllChecked = mergedItems.length > 0 && mergedItems.every((i) => i.checked);
+  const mergedCheckedUniformQty = mergedCheckedItems.filter((i) => !i.isMarking).reduce((s, i) => s + i.sentQty, 0);
+  const mergedCheckedMarkingQty = mergedCheckedItems.filter((i) => i.isMarking).reduce((s, i) => s + i.sentQty, 0);
+  const mergedCheckedTotalQty = mergedCheckedUniformQty + mergedCheckedMarkingQty;
+  const mergedHasShortage = mergedItems.some((i) => i.isShortage);
+
+  // 통합 뷰 수량 변경
+  const handleMergedSentChange = (skuId: string, value: number) => {
+    setMergedItems((prev) =>
+      prev.map((item) =>
+        item.skuId === skuId ? { ...item, sentQty: Math.max(0, value) } : item
+      )
+    );
+  };
+
+  // 통합 뷰 엑셀 다운로드
+  const handleMergedDownloadTemplate = () => {
+    generateTemplate(
+      mergedItems.map((item) => ({
+        skuId: item.skuId,
+        skuName: item.skuName,
+        barcode: item.barcode,
+        qty: item.sentQty,
+      })),
+      `전체발송수량_${today}.xlsx`
+    );
+  };
+
+  // 통합 뷰 엑셀 업로드
+  const handleMergedExcelUpload = async (e: ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setMergedUploadComparison(null);
+    try {
+      const result = await parseQtyExcel(
+        file,
+        mergedItems.map((item) => ({ skuId: item.skuId, skuName: item.skuName, barcode: item.barcode }))
+      );
+      const matchMap = new Map(result.matched.map((m) => [m.skuId, m.uploadedQty]));
+      setMergedItems((prev) =>
+        prev.map((item) =>
+          matchMap.has(item.skuId) ? { ...item, sentQty: matchMap.get(item.skuId)!, checked: matchMap.get(item.skuId)! > 0 } : item
+        )
+      );
+      const rows: ComparisonRow[] = result.matched.map((m) => {
+        const item = mergedItems.find((i) => i.skuId === m.skuId);
+        return {
+          skuId: m.skuId,
+          skuName: item?.skuName || m.skuId,
+          expected: item?.orderedQty ?? 0,
+          uploaded: m.uploadedQty,
+          diff: m.uploadedQty - (item?.orderedQty ?? 0),
+        };
+      });
+      setMergedUploadComparison({ rows, unmatched: result.unmatched });
+    } catch (err: any) {
+      setError(err.message || '파일 처리 실패');
+    }
+    if (mergedFileInputRef.current) mergedFileInputRef.current.value = '';
+  };
+
+  // 통합 뷰 발송 확인 클릭
+  const handleMergedConfirmClick = () => {
+    const checked = mergedItems.filter((i) => i.checked && i.sentQty > 0);
+    if (checked.length === 0) {
+      setError('발송할 품목을 선택해주세요.');
+      return;
+    }
+    setShowMergedConfirmModal(true);
+  };
+
+  // 통합 뷰 발송 확인 실행 — 날짜순 차감 핵심 로직
+  const handleMergedConfirm = async () => {
+    setShowMergedConfirmModal(false);
+    setMergedConfirming(true);
+    setMergedConfirmProgress(null);
+    setError(null);
+
+    try {
+      const finalItems = mergedItems.map((item) => ({
+        ...item,
+        sentQty: item.checked ? item.sentQty : 0,
+      }));
+
+      // Step A: sentQty를 WO별로 분배 (날짜순 — sources는 이미 오름차순)
+      const woAllocation: Record<string, Record<string, number>> = {};
+      for (const item of finalItems) {
+        if (item.sentQty <= 0) continue;
+        let remaining = item.sentQty;
+        for (const src of item.sources) {
+          if (remaining <= 0) break;
+          const alloc = Math.min(src.availableQty, remaining);
+          if (alloc > 0) {
+            if (!woAllocation[src.woId]) woAllocation[src.woId] = {};
+            woAllocation[src.woId][item.skuId] = (woAllocation[src.woId][item.skuId] || 0) + alloc;
+            remaining -= alloc;
+          }
+        }
+      }
+
+      const affectedWoIds = Object.keys(woAllocation);
+      const totalSteps = affectedWoIds.length * 3 + 2; // sent_detail + lines + inventory + activity
+      let stepNum = 1;
+
+      // Step B: WO별 sent_detail 업데이트 + status 전이
+      for (const woId of affectedWoIds) {
+        setMergedConfirmProgress({ current: stepNum, total: totalSteps, step: `WO 상태 업데이트 중...` });
+        const skuAlloc = woAllocation[woId];
+
+        // sent_detail fresh 조회
+        const { data: woData } = await supabase
+          .from('work_order').select('sent_detail, status').eq('id', woId).single();
+        const prevDetail: Record<string, number> = (woData as any)?.sent_detail || {};
+        const woStatus: string = (woData as any)?.status || '이관준비';
+        const newDetail: Record<string, number> = { ...prevDetail };
+        for (const [skuId, qty] of Object.entries(skuAlloc)) {
+          newDetail[skuId] = (newDetail[skuId] || 0) + qty;
+        }
+
+        if (woStatus === '이관준비') {
+          await supabase.from('work_order')
+            .update({ status: '이관중', sent_detail: newDetail })
+            .eq('id', woId);
+        } else {
+          await supabase.from('work_order')
+            .update({ sent_detail: newDetail })
+            .eq('id', woId);
+        }
+        stepNum++;
+      }
+
+      // Step C: WO별 라인 sent_qty 비례배분
+      for (const woId of affectedWoIds) {
+        setMergedConfirmProgress({ current: stepNum, total: totalSteps, step: `라인 처리 중...` });
+        const skuAlloc = woAllocation[woId];
+
+        // 핵심: sent_qty 누적 여부. 이 WO에 대한 이전 발송이 있었는지 확인
+        const woObj = workOrders.find((w) => w.id === woId);
+        const hadPriorShipment = woObj?.status !== '이관준비';
+
+        const { data: lines } = await supabase
+          .from('work_order_line')
+          .select('id, finished_sku_id, ordered_qty, sent_qty, needs_marking')
+          .eq('work_order_id', woId);
+        const lineList = (lines || []) as any[];
+
+        const confirmMarkingSkuIds = lineList
+          .filter((l) => l.needs_marking)
+          .map((l) => l.finished_sku_id as string);
+        const { data: confirmBomData } = await supabase
+          .from('bom')
+          .select('finished_sku_id, component_sku_id, quantity')
+          .in('finished_sku_id', confirmMarkingSkuIds.length > 0 ? confirmMarkingSkuIds : ['__none__']);
+
+        const lineSentQtyMap: Record<string, number> = {};
+        const consumedFromSentMap: Record<string, number> = {};
+
+        for (const line of lineList) {
+          if (!line.needs_marking) {
+            const maxQty = hadPriorShipment
+              ? Math.max(0, (line.ordered_qty || 0) - (line.sent_qty || 0))
+              : line.ordered_qty || 0;
+            const qty = Math.min(skuAlloc[line.finished_sku_id] || 0, maxQty);
+            lineSentQtyMap[line.id] = qty;
+            consumedFromSentMap[line.finished_sku_id] = (consumedFromSentMap[line.finished_sku_id] || 0) + qty;
+          }
+        }
+
+        const markingLines = lineList.filter((l: any) => l.needs_marking);
+        const compToLines: Record<string, { lineId: string; effectiveQty: number }[]> = {};
+        for (const line of markingLines) {
+          const boms = (confirmBomData || []).filter((b: any) => b.finished_sku_id === line.finished_sku_id);
+          const uniformComp = boms.find((b: any) => !b.component_sku_id?.includes('MK'));
+          const compId = uniformComp?.component_sku_id || boms[0]?.component_sku_id;
+          if (!compId) { lineSentQtyMap[line.id] = 0; continue; }
+          if (!compToLines[compId]) compToLines[compId] = [];
+          const effectiveQty = hadPriorShipment
+            ? Math.max(0, (line.ordered_qty || 0) - (line.sent_qty || 0))
+            : line.ordered_qty;
+          compToLines[compId].push({ lineId: line.id, effectiveQty });
+        }
+
+        for (const [compId, entries] of Object.entries(compToLines)) {
+          const rawCompSent = skuAlloc[compId] || 0;
+          const alreadyConsumed = consumedFromSentMap[compId] || 0;
+          const totalCompSent = Math.max(0, rawCompSent - alreadyConsumed);
+          const totalEffective = entries.reduce((s, e) => s + e.effectiveQty, 0);
+          if (totalEffective === 0) {
+            entries.forEach(e => { lineSentQtyMap[e.lineId] = 0; });
+            continue;
+          }
+          let distributed = 0;
+          for (let i = 0; i < entries.length; i++) {
+            if (i === entries.length - 1) {
+              lineSentQtyMap[entries[i].lineId] = totalCompSent - distributed;
+            } else {
+              const share = Math.round(totalCompSent * entries[i].effectiveQty / totalEffective);
+              lineSentQtyMap[entries[i].lineId] = share;
+              distributed += share;
+            }
+          }
+        }
+
+        // 라인 sent_qty 업데이트
+        const BATCH = 10;
+        for (let i = 0; i < lineList.length; i += BATCH) {
+          const batch = lineList.slice(i, i + BATCH);
+          await Promise.all(batch.map((line: any) => {
+            const thisTimeSent = lineSentQtyMap[line.id] ?? 0;
+            const rawSentQty = hadPriorShipment
+              ? (line.sent_qty || 0) + thisTimeSent
+              : thisTimeSent;
+            const newSentQty = Math.min(rawSentQty, line.ordered_qty || rawSentQty);
+            return supabase.from('work_order_line').update({ sent_qty: newSentQty }).eq('id', line.id);
+          }));
+        }
+        stepNum++;
+      }
+
+      // Step D: 재고 차감 1회만 (SKU별 총 발송량 합산)
+      setMergedConfirmProgress({ current: stepNum, total: totalSteps, step: '재고 차감 중...' });
+      const totalSentBySku: Record<string, number> = {};
+      for (const item of finalItems) {
+        if (item.sentQty > 0) {
+          totalSentBySku[item.skuId] = (totalSentBySku[item.skuId] || 0) + item.sentQty;
+        }
+      }
+
+      const { data: warehouse } = await supabase
+        .from('warehouse').select('id').eq('name', '오프라인샵').maybeSingle();
+      if (warehouse) {
+        const whId = (warehouse as any).id;
+        const skuEntries = Object.entries(totalSentBySku);
+        const BATCH = 10;
+        for (let i = 0; i < skuEntries.length; i += BATCH) {
+          const batch = skuEntries.slice(i, i + BATCH);
+          await Promise.all(batch.map(async ([skuId, qty]) => {
+            const { data: inv } = await supabase
+              .from('inventory').select('id, quantity')
+              .eq('warehouse_id', whId).eq('sku_id', skuId).maybeSingle();
+            if (inv) {
+              await supabase.from('inventory')
+                .update({ quantity: Math.max(0, (inv as any).quantity - qty) })
+                .eq('id', (inv as any).id);
+            }
+            await recordTransaction({
+              warehouseId: whId,
+              skuId,
+              txType: '출고',
+              quantity: qty,
+              source: 'system',
+              memo: `전체발송 확인`,
+            });
+          }));
+        }
+      }
+      stepNum++;
+
+      // Step E: activity_log 기록 (영향받은 WO별로 기록)
+      setMergedConfirmProgress({ current: stepNum, total: totalSteps, step: '이력 기록 중...' });
+      for (const woId of affectedWoIds) {
+        try {
+          const { data: existingWaves } = await supabase
+            .from('activity_log').select('id')
+            .eq('work_order_id', woId).eq('action_type', 'shipment_confirm');
+          const waveNum = (existingWaves || []).length + 1;
+          const woDate = workOrders.find((w) => w.id === woId)?.download_date || '';
+          const woSkuItems = Object.entries(woAllocation[woId] || {}).map(([skuId, qty]) => {
+            const item = mergedItems.find((i) => i.skuId === skuId);
+            return { skuId, skuName: item?.skuName || skuId, sentQty: qty };
+          });
+
+          await supabase.from('activity_log').insert({
+            user_id: currentUser.id,
+            action_type: 'shipment_confirm',
+            work_order_id: woId,
+            action_date: today,
+            summary: {
+              wave: waveNum,
+              mergedShipment: true,
+              items: woSkuItems,
+              totalQty: woSkuItems.reduce((s, i) => s + i.sentQty, 0),
+              workOrderDate: woDate,
+            },
+          });
+        } catch (logErr) { console.warn('Activity log failed:', logErr); }
+      }
+
+      // Step F: 완료 후 초기화
+      setWoItemsCache({});
+      setMergedItems([]);
+      setMergedExpanded(false);
+      setConfirmed(true);
+      setConfirmedWoId(null);
+      setConfirmedWoDate(null);
+      loadPendingOrders();
+
+      // 슬랙 알림
+      notifySlack({
+        action: '발송확인',
+        user: currentUser.name || currentUser.email,
+        date: `전체 (${affectedWoIds.length}건)`,
+        items: finalItems.filter((i) => i.sentQty > 0).map((i) => ({ name: i.skuName, qty: i.sentQty })),
+      }).catch(() => {});
+    } catch (e: any) {
+      setError(`전체 발송 처리 실패: ${e.message || '알 수 없는 오류'}. 잠시 후 다시 시도해주세요.`);
+    } finally {
+      setMergedConfirming(false);
+      setMergedConfirmProgress(null);
+    }
   };
 
   // ── 발송 확인 (확인 모달 → 실행) ──
@@ -1251,8 +1681,248 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
       {/* 헤더 */}
       <h2 className="text-xl font-bold text-gray-900">발송 확인</h2>
 
-      {/* 전체 발송 대기 요약 */}
-      {workOrders.length > 0 && (
+      {/* 전체 발송대기 통합 뷰 — 아코디언 */}
+      {workOrders.length > 1 && (
+        <div className="bg-white rounded-xl shadow-sm border border-indigo-200 overflow-hidden">
+          {/* 아코디언 헤더 */}
+          <button
+            onClick={toggleMergedAccordion}
+            className={`w-full flex items-center justify-between px-5 py-3.5 transition-colors ${
+              mergedExpanded ? 'bg-gradient-to-r from-blue-50 to-indigo-50 border-b border-indigo-100' : 'bg-gradient-to-r from-blue-50 to-indigo-50 hover:from-blue-100 hover:to-indigo-100'
+            }`}
+          >
+            <div className="flex items-center gap-3">
+              {mergedExpanded ? <ChevronUp size={18} className="text-indigo-600" /> : <ChevronDown size={18} className="text-indigo-400" />}
+              <div className="flex items-center gap-2">
+                <Truck size={18} className="text-indigo-600" />
+                <span className="text-sm font-semibold text-indigo-800">전체 발송대기</span>
+                <span className="text-xs text-indigo-600 bg-indigo-100 px-1.5 py-0.5 rounded">통합</span>
+              </div>
+            </div>
+            <div className="text-right">
+              <p className="text-xs text-indigo-600">작업지시서 {workOrders.length}건</p>
+              <p className="text-sm font-bold text-indigo-900">
+                잔량 {workOrders.reduce((s, wo) => s + (wo.remainingQty || 0), 0).toLocaleString()}개
+              </p>
+            </div>
+          </button>
+
+          {/* 아코디언 본문 */}
+          {mergedExpanded && (
+            <div className="px-5 py-4 space-y-4">
+              {mergedLoading ? (
+                <TwoColumnSkeleton />
+              ) : mergedItems.length > 0 ? (
+                <>
+                  {/* 엑셀 버튼 */}
+                  <div className="flex gap-2">
+                    <button
+                      onClick={handleMergedDownloadTemplate}
+                      className="flex items-center gap-1.5 px-3 py-2 text-sm border border-gray-300 rounded-lg text-gray-600 hover:bg-gray-50 transition-colors"
+                    >
+                      <Download size={15} />
+                      양식 다운로드
+                    </button>
+                    <button
+                      onClick={() => mergedFileInputRef.current?.click()}
+                      className="flex items-center gap-1.5 px-3 py-2 text-sm border border-blue-300 rounded-lg text-blue-600 hover:bg-blue-50 transition-colors"
+                    >
+                      <FileUp size={15} />
+                      엑셀 업로드
+                    </button>
+                    <input
+                      ref={mergedFileInputRef}
+                      type="file"
+                      accept=".xlsx,.xls,.csv"
+                      className="hidden"
+                      onChange={handleMergedExcelUpload}
+                    />
+                  </div>
+
+                  {/* 비교 패널 */}
+                  {mergedUploadComparison && (
+                    <ComparisonPanel
+                      rows={mergedUploadComparison.rows}
+                      unmatched={mergedUploadComparison.unmatched}
+                      onClose={() => setMergedUploadComparison(null)}
+                    />
+                  )}
+
+                  {/* 품목 카드 */}
+                  <div className="bg-white rounded-xl border border-gray-100 overflow-hidden">
+                    <div className="px-5 py-4 border-b border-gray-50 flex items-center justify-between">
+                      <div>
+                        <h3 className="font-medium text-gray-900">전체 발송대기 물량 (통합)</h3>
+                        <p className="text-sm text-gray-500 mt-0.5">모든 작업지시서 합산</p>
+                      </div>
+                      <label className="flex items-center gap-1.5 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={mergedAllChecked}
+                          onChange={(e) => toggleMergedAll(e.target.checked)}
+                          className="w-4 h-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+                        />
+                        <span className="text-xs text-gray-500">전체</span>
+                      </label>
+                    </div>
+
+                    {/* 총 수량 합계 */}
+                    <div className="px-5 py-3 bg-indigo-50/60 border-b border-gray-100 space-y-1">
+                      <div className="flex items-center justify-between text-sm">
+                        <span className="text-blue-700">유니폼 소계</span>
+                        <span className="font-semibold text-blue-800">{mergedCheckedUniformQty}개</span>
+                      </div>
+                      <div className="flex items-center justify-between text-sm">
+                        <span className="text-purple-700">마킹 소계</span>
+                        <span className="font-semibold text-purple-800">{mergedCheckedMarkingQty}개</span>
+                      </div>
+                      <div className="border-t border-indigo-200 pt-1 mt-1 flex items-center justify-between text-sm">
+                        <span className="font-bold text-gray-800">총 발송 수량 ({mergedCheckedItems.length}종)</span>
+                        <span className="font-bold text-gray-900 text-base">{mergedCheckedTotalQty}개</span>
+                      </div>
+                    </div>
+
+                    {mergedHasShortage && (
+                      <div className="mx-4 mt-4 flex items-start gap-2 bg-yellow-50 border border-yellow-200 rounded-lg p-3">
+                        <AlertTriangle size={16} className="text-yellow-600 flex-shrink-0 mt-0.5" />
+                        <p className="text-sm text-yellow-800">
+                          일부 품목 재고가 부족합니다. 실제 발송 수량을 직접 입력해주세요.
+                        </p>
+                      </div>
+                    )}
+
+                    {/* 2컬럼 레이아웃 */}
+                    <div className="grid grid-cols-2 text-center text-xs font-semibold py-2 border-b border-gray-100">
+                      <div className="bg-blue-50 rounded-l py-1.5">유니폼 단품 ({mergedItems.filter(i => !i.isMarking).length}종)</div>
+                      <div className="bg-purple-50 rounded-r py-1.5">마킹 단품 ({mergedItems.filter(i => i.isMarking).length}종)</div>
+                    </div>
+
+                    <div className="grid grid-cols-2 min-h-[100px]">
+                      {/* 왼쪽: 유니폼 */}
+                      <div className="border-r border-gray-100 divide-y divide-gray-50">
+                        {mergedItems.filter(i => !i.isMarking).map((item) => (
+                          <div key={item.skuId} className={`px-3 py-2.5 ${item.isShortage ? 'bg-red-50' : ''}`}>
+                            <div className="flex items-start gap-2">
+                              <input
+                                type="checkbox"
+                                checked={item.checked}
+                                onChange={() => toggleMergedCheck(item.skuId)}
+                                className="mt-1 w-4 h-4 rounded border-gray-300 text-blue-600"
+                              />
+                              <div className="flex-1 min-w-0">
+                                <p className="text-sm font-medium text-gray-900 truncate">{item.skuName}</p>
+                                <p className="text-xs text-gray-400 truncate">{item.skuId}</p>
+                                <div className="flex items-center gap-2 mt-1">
+                                  <span className="text-xs text-gray-500">주문 {item.orderedQty}</span>
+                                  <span className="text-xs text-gray-400">|</span>
+                                  <span className={`text-xs ${item.isShortage ? 'text-red-600 font-medium' : 'text-gray-500'}`}>
+                                    재고 {item.inventoryQty}
+                                  </span>
+                                </div>
+                                {/* 출처 표시 */}
+                                {item.sources.length > 1 && (
+                                  <div className="mt-1 flex flex-wrap gap-1">
+                                    {item.sources.map((src) => (
+                                      <span key={src.woId} className="text-[10px] bg-gray-100 text-gray-500 px-1 rounded">
+                                        {src.woDate.slice(5)} ({src.availableQty})
+                                      </span>
+                                    ))}
+                                  </div>
+                                )}
+                                <div className="mt-1.5">
+                                  <input
+                                    type="number"
+                                    min={0}
+                                    value={item.sentQty}
+                                    onChange={(e) => handleMergedSentChange(item.skuId, parseInt(e.target.value) || 0)}
+                                    className="w-20 px-2 py-1 text-sm border border-gray-300 rounded focus:ring-1 focus:ring-blue-400 focus:border-blue-400"
+                                  />
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+
+                      {/* 오른쪽: 마킹 */}
+                      <div className="divide-y divide-gray-50">
+                        {mergedItems.filter(i => i.isMarking).map((item) => (
+                          <div key={item.skuId} className={`px-3 py-2.5 ${item.isShortage ? 'bg-red-50' : ''}`}>
+                            <div className="flex items-start gap-2">
+                              <input
+                                type="checkbox"
+                                checked={item.checked}
+                                onChange={() => toggleMergedCheck(item.skuId)}
+                                className="mt-1 w-4 h-4 rounded border-gray-300 text-purple-600"
+                              />
+                              <div className="flex-1 min-w-0">
+                                <p className="text-sm font-medium text-gray-900 truncate">{item.skuName}</p>
+                                <p className="text-xs text-gray-400 truncate">{item.skuId}</p>
+                                <div className="flex items-center gap-2 mt-1">
+                                  <span className="text-xs text-gray-500">주문 {item.orderedQty}</span>
+                                  <span className="text-xs text-gray-400">|</span>
+                                  <span className={`text-xs ${item.isShortage ? 'text-red-600 font-medium' : 'text-gray-500'}`}>
+                                    재고 {item.inventoryQty}
+                                  </span>
+                                </div>
+                                {item.sources.length > 1 && (
+                                  <div className="mt-1 flex flex-wrap gap-1">
+                                    {item.sources.map((src) => (
+                                      <span key={src.woId} className="text-[10px] bg-gray-100 text-gray-500 px-1 rounded">
+                                        {src.woDate.slice(5)} ({src.availableQty})
+                                      </span>
+                                    ))}
+                                  </div>
+                                )}
+                                <div className="mt-1.5">
+                                  <input
+                                    type="number"
+                                    min={0}
+                                    value={item.sentQty}
+                                    onChange={(e) => handleMergedSentChange(item.skuId, parseInt(e.target.value) || 0)}
+                                    className="w-20 px-2 py-1 text-sm border border-gray-300 rounded focus:ring-1 focus:ring-purple-400 focus:border-purple-400"
+                                  />
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* 발송 확인 버튼 */}
+                  <button
+                    onClick={handleMergedConfirmClick}
+                    disabled={mergedConfirming || mergedCheckedItems.length === 0}
+                    className="w-full py-3.5 rounded-xl text-white font-semibold text-base bg-indigo-600 hover:bg-indigo-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors"
+                  >
+                    {mergedConfirming ? '처리 중...' : `전체 발송 완료 확인 (${mergedCheckedItems.length}종)`}
+                  </button>
+
+                  {/* 통합 진행 바 */}
+                  {mergedConfirmProgress && (
+                    <div className="space-y-2">
+                      <div className="w-full bg-gray-200 rounded-full h-2">
+                        <div
+                          className="bg-indigo-600 h-2 rounded-full transition-all"
+                          style={{ width: `${(mergedConfirmProgress.current / mergedConfirmProgress.total) * 100}%` }}
+                        />
+                      </div>
+                      <p className="text-xs text-gray-500 text-center">{mergedConfirmProgress.step}</p>
+                    </div>
+                  )}
+                </>
+              ) : (
+                <p className="text-sm text-gray-500 text-center py-4">품목을 불러오는 중...</p>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* 작업지시서 1건일 때 요약 배너 (아코디언 불필요) */}
+      {workOrders.length === 1 && (
         <div className="bg-gradient-to-r from-blue-50 to-indigo-50 rounded-xl border border-blue-200 px-5 py-4">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
@@ -1260,9 +1930,9 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
               <span className="text-sm font-semibold text-blue-800">전체 발송 대기</span>
             </div>
             <div className="text-right">
-              <p className="text-xs text-blue-600">작업지시서 {workOrders.length}건</p>
+              <p className="text-xs text-blue-600">작업지시서 1건</p>
               <p className="text-lg font-bold text-blue-900">
-                잔량 {workOrders.reduce((s, wo) => s + (wo.remainingQty || 0), 0).toLocaleString()}개
+                잔량 {(workOrders[0].remainingQty || 0).toLocaleString()}개
               </p>
             </div>
           </div>
@@ -1610,6 +2280,55 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
       )}
 
       </>)}
+
+      {/* ── 통합 발송 확인 모달 ── */}
+      {showMergedConfirmModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4">
+          <div className="bg-white rounded-2xl shadow-xl max-w-sm w-full p-6 space-y-4">
+            <h3 className="text-lg font-bold text-gray-900">전체 발송 확인</h3>
+            <div className="bg-indigo-50 rounded-lg p-4 space-y-2">
+              <div className="flex justify-between text-sm">
+                <span className="text-gray-600">발송 품목</span>
+                <span className="font-semibold text-gray-900">{mergedCheckedItems.length}종</span>
+              </div>
+              <div className="flex justify-between text-sm">
+                <span className="text-gray-600">유니폼</span>
+                <span className="font-semibold text-blue-700">{mergedCheckedUniformQty}개</span>
+              </div>
+              <div className="flex justify-between text-sm">
+                <span className="text-gray-600">마킹</span>
+                <span className="font-semibold text-purple-700">{mergedCheckedMarkingQty}개</span>
+              </div>
+              <div className="border-t border-indigo-200 pt-2 flex justify-between text-sm">
+                <span className="font-bold text-gray-800">총 발송 수량</span>
+                <span className="font-bold text-gray-900">{mergedCheckedTotalQty}개</span>
+              </div>
+            </div>
+            <div className="bg-amber-50 border border-amber-200 rounded-lg p-3">
+              <p className="text-xs text-amber-800">
+                작업지시서 {Object.keys(mergedItems.reduce<Record<string, boolean>>((acc, item) => {
+                  item.sources.forEach(s => { acc[s.woId] = true; });
+                  return acc;
+                }, {})).length}건에 걸쳐 날짜 순서대로 차감됩니다
+              </p>
+            </div>
+            <div className="flex gap-2">
+              <button
+                onClick={() => setShowMergedConfirmModal(false)}
+                className="flex-1 py-2.5 border border-gray-300 rounded-xl text-sm font-medium text-gray-600 hover:bg-gray-50"
+              >
+                취소
+              </button>
+              <button
+                onClick={handleMergedConfirm}
+                className="flex-1 py-2.5 bg-indigo-600 text-white rounded-xl text-sm font-semibold hover:bg-indigo-700"
+              >
+                전체 발송 확인
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ── 취소 확인 모달 ── */}
       {showCancelConfirm && (
