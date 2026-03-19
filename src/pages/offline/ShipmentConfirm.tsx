@@ -954,9 +954,7 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
             </button>
           ) : (
             <p className="text-xs text-red-400 text-center">
-              {historyWorkOrder.status === '입고확인완료' || historyWorkOrder.status === '마킹중' || historyWorkOrder.status === '마킹완료' || historyWorkOrder.status === '출고완료'
-                ? '입고확인 완료 — 삭제 불가'
-                : `현재 상태: ${historyWorkOrder.status} — 삭제 불가`}
+              발송 기록이 없는 상태입니다
             </p>
           )}
         </div>
