@@ -268,7 +268,7 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
         { lineId: string; skuId: string; skuName: string; barcode: string | null; needed: number; isMarking: boolean }
       > = {};
 
-      const isAdditionalShipment = wo.status === '이관중';
+      const isAdditionalShipment = wo.status !== '이관준비';
 
       // sent_detail 조회 (구성품 레벨 발송 이력)
       const { data: woSentData } = await supabase
@@ -557,7 +557,7 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
       const sentMap: Record<string, number> = {};
       for (const item of finalItems) sentMap[item.skuId] = item.sentQty;
 
-      const isAdditional = selectedWo.status === '이관중';
+      const isAdditional = selectedWo.status !== '이관준비';
 
       setConfirmProgress({ current: 1, total: 4, step: '발송 상태 업데이트 중...' });
 
@@ -944,7 +944,7 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
       {/* 삭제 버튼 영역 */}
       {historyItems.length > 0 && historyWorkOrder && (
         <div className="px-5 py-3 bg-red-50 border-t border-red-100">
-          {historyWorkOrder.status === '이관중' ? (
+          {historyWorkOrder.status !== '이관준비' ? (
             <button
               onClick={() => setShowDeleteModal(true)}
               className="w-full flex items-center justify-center gap-2 py-2.5 px-4 bg-red-500 text-white rounded-lg text-sm font-medium hover:bg-red-600 transition-colors"
@@ -1366,7 +1366,7 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
       )}
 
       {/* 추가 발송 안내 */}
-      {selectedWo?.status === '이관중' && (
+      {selectedWo?.status !== '이관준비' && selectedWo && (
         <div className="flex items-center gap-2 bg-amber-50 border border-amber-200 rounded-xl px-4 py-3">
           <span className="text-amber-600 text-lg">🔄</span>
           <div>
@@ -1381,7 +1381,7 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
         <div className="px-5 py-4 border-b border-gray-50 flex items-center justify-between">
           <div>
             <h3 className="font-medium text-gray-900">
-              {selectedWo?.status === '이관중' ? '추가 발송 물량 (잔량)' : '제작센터(플레이위즈)로 보낼 물량'}
+              {selectedWo?.status !== '이관준비' ? '추가 발송 물량 (잔량)' : '제작센터(플레이위즈)로 보낼 물량'}
             </h3>
             <p className="text-sm text-gray-500 mt-0.5">{selectedWo?.download_date} 기준</p>
           </div>
