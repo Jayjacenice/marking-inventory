@@ -364,7 +364,7 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
             skuName,
             barcode: line.finished_sku?.barcode || null,
             remainingQty: remaining,
-            todayQty: todayMap[line.id] || 0,
+            todayQty: 0, // 항상 0으로 시작 (중복 저장 방지)
             markedQty: line.marked_qty,
             orderedQty: line.ordered_qty,
             sentQty,
@@ -896,7 +896,6 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
   // ── 집계 ──
 
   const carryOverItems = items.filter((i) => i.isCarryOver);
-  const todayNewItems = items.filter((i) => !i.isCarryOver);
   const totalRemaining = items.reduce((s, i) => s + i.remainingQty, 0);
   const totalToday = items.reduce((s, i) => s + i.todayQty, 0);
   const allComplete = items.every((item) => item.todayQty >= item.remainingQty);
@@ -1915,14 +1914,16 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
         </div>
       )}
 
-      {/* ── 날짜별 아코디언 (오늘이고 orders > 1) ── */}
+      {/* ── 날짜별 아코디언 (오늘이고 orders > 1) — 완료된 날짜 제외 ── */}
       {isToday && orders.length > 1 && orders.map((wo) => {
         const isExpanded = expandedWoIds.has(wo.id);
         const isLoadingThis = woLoadingId === wo.id;
         const cached = woItemsCache[wo.id];
-        const isActive = selectedOrder?.id === wo.id;
         const woRemaining = cached ? cached.items.reduce((s, i) => s + i.remainingQty, 0) : 0;
         const woItemCount = cached ? cached.items.length : 0;
+
+        // 작업 완료된 날짜는 아코디언 제외
+        if (cached && woRemaining === 0) return null;
 
         return (
           <div key={wo.id} className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
@@ -1949,11 +1950,28 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
             </button>
 
             {isExpanded && (
-              <div className="px-5 py-4 space-y-3">
+              <div className="px-5 py-3 space-y-1">
                 {isLoadingThis ? (
                   <TableSkeleton />
-                ) : (cached || isActive) ? (
-                  <p className="text-sm text-gray-500 text-center">아래 작업 입력 영역에서 이 작업지시서의 항목을 확인하세요</p>
+                ) : cached ? (
+                  <div className="max-h-64 overflow-y-auto divide-y divide-gray-50">
+                    {cached.items.filter((i) => i.remainingQty > 0).map((item) => (
+                      <div key={item.lineId} className="flex items-center justify-between py-2 text-sm">
+                        <div className="flex items-center gap-2 min-w-0 flex-1">
+                          <span className="text-gray-800 truncate">{item.skuName}</span>
+                          {item.isCarryOver && (
+                            <span className="text-[10px] px-1.5 py-0.5 bg-orange-100 text-orange-600 rounded-full flex-shrink-0">이월</span>
+                          )}
+                        </div>
+                        <span className="text-blue-700 font-medium flex-shrink-0 ml-2">잔여 {item.remainingQty}개</span>
+                      </div>
+                    ))}
+                    {cached.unavailable.length > 0 && (
+                      <div className="py-2 text-xs text-yellow-600">
+                        ⚠️ 작업불가 {cached.unavailable.length}종 (재고 부족)
+                      </div>
+                    )}
+                  </div>
                 ) : null}
               </div>
             )}
@@ -2038,19 +2056,17 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
 
           {/* 총 수량 합계 */}
           <div className="bg-white rounded-xl shadow-sm border border-gray-100 px-5 py-3">
-            <div className="grid grid-cols-2 gap-4 text-sm">
-              <div className="flex justify-between">
-                <span className="text-orange-600">이월:</span>
-                <span className="font-semibold text-gray-900">{carryOverItems.length}건 {carryOverItems.reduce((s, i) => s + i.remainingQty, 0)}개</span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-blue-600">신규:</span>
-                <span className="font-semibold text-gray-900">{todayNewItems.length}건 {todayNewItems.reduce((s, i) => s + i.remainingQty, 0)}개</span>
-              </div>
+            <div className="grid grid-cols-3 gap-4 text-sm">
               <div className="flex justify-between">
                 <span className="text-gray-500">총 잔여:</span>
                 <span className="font-semibold text-gray-900">{totalRemaining}개</span>
               </div>
+              {carryOverItems.length > 0 && (
+                <div className="flex justify-between">
+                  <span className="text-orange-600">이월분:</span>
+                  <span className="font-semibold text-orange-700">{carryOverItems.reduce((s, i) => s + i.remainingQty, 0)}개</span>
+                </div>
+              )}
               <div className="flex justify-between">
                 <span className="text-gray-500">오늘 입력:</span>
                 <span className="font-bold text-blue-700">{totalToday}개</span>
@@ -2159,43 +2175,28 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
             </div>
           )}
 
-          {/* 작업 목록 카드 */}
+          {/* 작업 목록 카드 — 통합 리스트 */}
           <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
             {items.length === 0 ? (
               <div className="px-5 py-8 text-center text-gray-400 text-sm">
                 모든 마킹 작업이 완료되었습니다
               </div>
             ) : (
-              <>
-                {/* 이월 작업건 (상단, 주황 배경) */}
-                {carryOverItems.length > 0 && (
-                  <div>
-                    <div className="px-4 py-2.5 bg-orange-50 border-b border-orange-200 flex items-center gap-2">
-                      <AlertTriangle size={14} className="text-orange-600" />
-                      <span className="text-sm font-medium text-orange-800">
-                        이월 작업 ({carryOverItems.length}건) — 우선 처리
+              <div>
+                <div className="px-4 py-2.5 bg-blue-50 border-b border-blue-200 flex items-center gap-2">
+                  <span className="text-sm font-medium text-blue-800">
+                    작업 목록 ({items.length}건)
+                    {carryOverItems.length > 0 && (
+                      <span className="ml-2 text-orange-600 font-normal">
+                        * 이월 {carryOverItems.length}건 포함
                       </span>
-                    </div>
-                    <div className="divide-y divide-gray-50">
-                      {carryOverItems.map(renderItemRow)}
-                    </div>
-                  </div>
-                )}
-
-                {/* 오늘 신규 작업건 */}
-                {todayNewItems.length > 0 && (
-                  <div>
-                    <div className="px-4 py-2.5 bg-blue-50 border-b border-blue-200 flex items-center gap-2">
-                      <span className="text-sm font-medium text-blue-800">
-                        {carryOverItems.length > 0 ? '오늘 작업' : '작업 목록'} ({todayNewItems.length}건)
-                      </span>
-                    </div>
-                    <div className="divide-y divide-gray-50">
-                      {todayNewItems.map(renderItemRow)}
-                    </div>
-                  </div>
-                )}
-              </>
+                    )}
+                  </span>
+                </div>
+                <div className="divide-y divide-gray-50">
+                  {items.map(renderItemRow)}
+                </div>
+              </div>
             )}
 
             {items.length > 0 && (
