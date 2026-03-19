@@ -897,6 +897,8 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
 
   const carryOverItems = items.filter((i) => i.isCarryOver);
   const totalRemaining = items.reduce((s, i) => s + i.remainingQty, 0);
+  const unavailableRemaining = unavailableItems.reduce((s, i) => s + Math.max(0, (i.receivedQty || 0) - (i.markedQty || 0)), 0);
+  const grandTotalRemaining = totalRemaining + unavailableRemaining;
   const totalToday = items.reduce((s, i) => s + i.todayQty, 0);
   const allComplete = items.every((item) => item.todayQty >= item.remainingQty);
 
@@ -1401,10 +1403,12 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
           <div className="flex items-center gap-2">
             <p className="text-sm font-medium text-gray-900 truncate">{item.skuName}</p>
           </div>
-          <p className="text-xs text-gray-400 mt-0.5">
-            잔여 {item.remainingQty}개
-            {item.markedQty > 0 && ` (누적완료 ${item.markedQty}개)`}
-          </p>
+          <div className="flex items-center gap-2 mt-0.5">
+            <span className="text-xs text-blue-600">잔여 {item.remainingQty}개</span>
+            {item.isCarryOver && (
+              <span className="text-[10px] px-1.5 py-0.5 bg-orange-100 text-orange-600 rounded-full">이월</span>
+            )}
+          </div>
         </div>
         <div className="flex items-center gap-2 flex-shrink-0">
           <input
@@ -1500,9 +1504,12 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
                           <span className="text-[10px] px-1.5 py-0.5 bg-orange-100 text-orange-600 rounded-full">이월</span>
                         )}
                       </div>
-                      <p className="text-xs text-gray-400 mt-0.5">
-                        누적완료 {item.markedQty}개 / 주문 {item.orderedQty}개
-                      </p>
+                      <div className="flex items-center gap-2 mt-0.5">
+                        <span className="text-xs text-blue-600">잔여 {item.remainingQty}개</span>
+                        {item.isCarryOver && (
+                          <span className="text-[10px] px-1.5 py-0.5 bg-orange-100 text-orange-600 rounded-full">이월</span>
+                        )}
+                      </div>
                     </div>
                     <p className="text-sm font-semibold text-orange-700 flex-shrink-0">
                       잔여 {item.remainingQty}개
@@ -2056,18 +2063,21 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
 
           {/* 총 수량 합계 */}
           <div className="bg-white rounded-xl shadow-sm border border-gray-100 px-5 py-3">
-            <div className="grid grid-cols-3 gap-4 text-sm">
-              <div className="flex justify-between">
+            <div className="flex flex-wrap gap-x-6 gap-y-1 text-sm">
+              <div className="flex gap-1">
                 <span className="text-gray-500">총 잔여:</span>
-                <span className="font-semibold text-gray-900">{totalRemaining}개</span>
+                <span className="font-semibold text-gray-900">{grandTotalRemaining}개</span>
+                {unavailableRemaining > 0 && (
+                  <span className="text-yellow-600 text-xs">(작업가능 {totalRemaining} + 불가 {unavailableRemaining})</span>
+                )}
               </div>
               {carryOverItems.length > 0 && (
-                <div className="flex justify-between">
-                  <span className="text-orange-600">이월분:</span>
+                <div className="flex gap-1">
+                  <span className="text-orange-600">이월:</span>
                   <span className="font-semibold text-orange-700">{carryOverItems.reduce((s, i) => s + i.remainingQty, 0)}개</span>
                 </div>
               )}
-              <div className="flex justify-between">
+              <div className="flex gap-1">
                 <span className="text-gray-500">오늘 입력:</span>
                 <span className="font-bold text-blue-700">{totalToday}개</span>
               </div>
