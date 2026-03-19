@@ -17,7 +17,7 @@ function parseBody(req: IncomingMessage): Promise<any> {
 }
 
 function send(res: ServerResponse, status: number, data: any) {
-  res.writeHead(status, { 'Content-Type': 'application/json' });
+  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
   res.end(JSON.stringify(data));
 }
 
@@ -75,7 +75,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
     const slackRes = await fetch('https://slack.com/api/chat.postMessage', {
       method: 'POST',
       headers: {
-        'Content-Type': 'application/json',
+        'Content-Type': 'application/json; charset=utf-8',
         Authorization: `Bearer ${token}`,
       },
       body: JSON.stringify({
