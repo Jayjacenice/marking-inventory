@@ -487,12 +487,12 @@ export default function StockLedger() {
       '상품명': r.skuName,
       '기초': r.opening,
       '입고': r.inQty,
+      '판매': r.salesQty,
       '이동출고': r.outQty,
       '반품': r.returnQty,
       '재고조정': r.adjustQty,
       '마킹출고': r.markingOutQty,
       '마킹입고': r.markingInQty,
-      '판매': r.salesQty,
       '기말': r.closing,
     }));
     const ws = XLSX.utils.json_to_sheet(exportData);
@@ -778,12 +778,12 @@ export default function StockLedger() {
                 <th className="px-3 py-3 text-left text-xs font-semibold text-gray-600 whitespace-nowrap">상품명</th>
                 <th className="px-3 py-3 text-right text-xs font-semibold text-gray-600 whitespace-nowrap">기초</th>
                 <th className="px-3 py-3 text-right text-xs font-semibold text-blue-600 whitespace-nowrap">입고</th>
+                <th className="px-3 py-3 text-right text-xs font-semibold text-red-600 whitespace-nowrap">판매</th>
                 <th className="px-3 py-3 text-right text-xs font-semibold text-red-600 whitespace-nowrap">이동출고</th>
                 <th className="px-3 py-3 text-right text-xs font-semibold text-green-600 whitespace-nowrap">반품</th>
                 <th className="px-3 py-3 text-right text-xs font-semibold text-orange-600 whitespace-nowrap">조정</th>
                 <th className="px-3 py-3 text-right text-xs font-semibold text-purple-600 whitespace-nowrap">마킹출고</th>
                 <th className="px-3 py-3 text-right text-xs font-semibold text-purple-600 whitespace-nowrap">마킹입고</th>
-                <th className="px-3 py-3 text-right text-xs font-semibold text-emerald-600 whitespace-nowrap">판매</th>
                 <th className="px-3 py-3 text-right text-xs font-semibold text-gray-900 whitespace-nowrap">기말</th>
               </tr>
             </thead>
@@ -808,12 +808,12 @@ export default function StockLedger() {
                     <td colSpan={4} className="px-3 py-2.5 text-xs font-bold text-gray-700">합계 ({filtered.length}건)</td>
                     <td className="px-3 py-2.5 text-right text-xs font-bold tabular-nums">{filtered.reduce((s, r) => s + r.opening, 0).toLocaleString()}</td>
                     <td className="px-3 py-2.5 text-right text-xs font-bold tabular-nums text-blue-600">{filtered.reduce((s, r) => s + r.inQty, 0).toLocaleString()}</td>
+                    <td className="px-3 py-2.5 text-right text-xs font-bold tabular-nums text-red-600">{filtered.reduce((s, r) => s + r.salesQty, 0).toLocaleString()}</td>
                     <td className="px-3 py-2.5 text-right text-xs font-bold tabular-nums text-red-600">{filtered.reduce((s, r) => s + r.outQty, 0).toLocaleString()}</td>
                     <td className="px-3 py-2.5 text-right text-xs font-bold tabular-nums text-green-600">{filtered.reduce((s, r) => s + r.returnQty, 0).toLocaleString()}</td>
                     <td className="px-3 py-2.5 text-right text-xs font-bold tabular-nums text-orange-600">{filtered.reduce((s, r) => s + r.adjustQty, 0).toLocaleString()}</td>
                     <td className="px-3 py-2.5 text-right text-xs font-bold tabular-nums text-purple-600">{filtered.reduce((s, r) => s + r.markingOutQty, 0).toLocaleString()}</td>
                     <td className="px-3 py-2.5 text-right text-xs font-bold tabular-nums text-purple-600">{filtered.reduce((s, r) => s + r.markingInQty, 0).toLocaleString()}</td>
-                    <td className="px-3 py-2.5 text-right text-xs font-bold tabular-nums text-emerald-600">{filtered.reduce((s, r) => s + r.salesQty, 0).toLocaleString()}</td>
                     <td className="px-3 py-2.5 text-right text-xs font-bold tabular-nums">{filtered.reduce((s, r) => s + r.closing, 0).toLocaleString()}</td>
                   </tr>
                   {filtered.map((r, i) => (
@@ -825,6 +825,9 @@ export default function StockLedger() {
                       <td className="px-3 py-2 text-right text-xs tabular-nums">{r.opening.toLocaleString()}</td>
                       <td className="px-3 py-2 text-right text-xs tabular-nums text-blue-600 font-medium">
                         {r.inQty > 0 ? r.inQty.toLocaleString() : '-'}
+                      </td>
+                      <td className="px-3 py-2 text-right text-xs tabular-nums text-red-600 font-medium">
+                        {r.salesQty > 0 ? r.salesQty.toLocaleString() : '-'}
                       </td>
                       <td className="px-3 py-2 text-right text-xs tabular-nums text-red-600 font-medium">
                         {r.outQty > 0 ? r.outQty.toLocaleString() : '-'}
@@ -840,9 +843,6 @@ export default function StockLedger() {
                       </td>
                       <td className="px-3 py-2 text-right text-xs tabular-nums text-purple-600 font-medium">
                         {r.markingInQty > 0 ? r.markingInQty.toLocaleString() : '-'}
-                      </td>
-                      <td className="px-3 py-2 text-right text-xs tabular-nums text-emerald-600 font-medium">
-                        {r.salesQty > 0 ? r.salesQty.toLocaleString() : '-'}
                       </td>
                       <td className="px-3 py-2 text-right text-xs tabular-nums font-bold">{r.closing.toLocaleString()}</td>
                     </tr>

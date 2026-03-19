@@ -47,6 +47,7 @@ export default function SalesUpload() {
 
   // 오프라인샵 창고
   const [offlineWarehouse, setOfflineWarehouse] = useState<{ id: string; name: string } | null>(null);
+  const [warehouseLoading, setWarehouseLoading] = useState(true);
 
   // 기존 POS 등록 현황
   const [posStatus, setPosStatus] = useState<{ dates: { date: string; count: number }[]; total: number }>({ dates: [], total: 0 });
@@ -59,9 +60,10 @@ export default function SalesUpload() {
   // 오프라인샵 창고 조회
   useEffect(() => {
     supabase.from('warehouse').select('id, name').then(({ data }) => {
-      if (!data) return;
+      if (!data) { setWarehouseLoading(false); return; }
       const wh = data.find((w) => w.name.includes('오프라인'));
       if (wh) setOfflineWarehouse(wh);
+      setWarehouseLoading(false);
     });
   }, []);
 
@@ -266,7 +268,7 @@ export default function SalesUpload() {
       </div>
 
       {/* 오프라인샵 창고 확인 */}
-      {!offlineWarehouse && (
+      {!warehouseLoading && !offlineWarehouse && (
         <div className="bg-red-50 border border-red-200 rounded-xl p-4 mb-4 text-sm text-red-700">
           <AlertTriangle className="w-4 h-4 inline mr-1" />
           오프라인샵 창고를 찾을 수 없습니다. 창고 설정을 확인하세요.
