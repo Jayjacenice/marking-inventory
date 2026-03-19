@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { supabase } from '../../lib/supabase';
+import { useStaleGuard } from '../../hooks/useStaleGuard';
 import { supabaseAdmin } from '../../lib/supabaseAdmin';
 import type { UserRole } from '../../types';
 import { Plus, Pencil, Trash2, Eye, EyeOff, X } from 'lucide-react';
@@ -29,6 +30,7 @@ interface Props {
 }
 
 export default function UserManage({ currentUserId }: Props) {
+  const isStale = useStaleGuard();
   const [users, setUsers] = useState<ManagedUser[]>([]);
   const [loading, setLoading] = useState(true);
   const [showModal, setShowModal] = useState(false);
@@ -77,7 +79,7 @@ export default function UserManage({ currentUserId }: Props) {
             created_at: p.created_at,
           };
         });
-        setUsers(mapped);
+        if (!isStale()) setUsers(mapped);
       }
     } catch (err) {
       console.error('loadUsers error:', err);

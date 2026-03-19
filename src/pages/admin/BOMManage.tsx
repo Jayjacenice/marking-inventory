@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { supabase } from '../../lib/supabase';
+import { useStaleGuard } from '../../hooks/useStaleGuard';
 import { parseBomExcel, parseBerrizBomExcel, type RawBomRow } from '../../lib/excelParser';
 import { Upload, Database, Trash2, AlertTriangle, CheckCircle, FileSpreadsheet, Search } from 'lucide-react';
 
@@ -15,6 +16,7 @@ interface BomEntry {
 type UploadMode = 'berriz' | 'manual';
 
 export default function BOMManage() {
+  const isStale = useStaleGuard();
   const [boms, setBoms] = useState<BomEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
@@ -50,7 +52,7 @@ export default function BOMManage() {
         if (data.length < PAGE_SIZE) break;
         offset += PAGE_SIZE;
       }
-      setBoms(allRows as BomEntry[]);
+      if (!isStale()) setBoms(allRows as BomEntry[]);
     } catch (err) {
       console.error('loadBoms error:', err);
     } finally {

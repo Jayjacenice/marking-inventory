@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { supabase } from '../../lib/supabase';
+import { useStaleGuard } from '../../hooks/useStaleGuard';
 import { recordTransaction } from '../../lib/inventoryTransaction';
 import { Search, Pencil, Check, X, Package, ClipboardList } from 'lucide-react';
 
@@ -17,6 +18,7 @@ const TABS = [
 type TabKey = (typeof TABS)[number]['key'];
 
 export default function InventoryManage() {
+  const isStale = useStaleGuard();
   const [activeTab, setActiveTab] = useState<TabKey>('offline');
   const [warehouseId, setWarehouseId] = useState<string | null>(null);
   const [rows, setRows] = useState<InventoryRow[]>([]);
@@ -50,6 +52,7 @@ export default function InventoryManage() {
         .single();
       if (whErr) throw whErr;
       if (!wh) throw new Error(`${currentTab.warehouseName} 창고를 찾을 수 없습니다.`);
+      if (isStale()) return;
       setWarehouseId(wh.id);
 
       // 재고 조회
@@ -60,6 +63,7 @@ export default function InventoryManage() {
         .gt('quantity', 0)
         .order('sku_id');
       if (invErr) throw invErr;
+      if (isStale()) return;
       setRows(
         ((data || []) as any[]).map((r) => ({
           sku_id: r.sku_id,

@@ -1,4 +1,5 @@
 import { useEffect, useState, useRef } from 'react';
+import { useStaleGuard } from '../../hooks/useStaleGuard';
 import { supabase } from '../../lib/supabase';
 import {
   exportAllForms,
@@ -164,6 +165,7 @@ function buildWaveOptions(logs: any[], qtyField: string): WaveOption[] {
 // ── 컴포넌트 ────────────────────────────────────
 
 export default function Downloads() {
+  const isStale = useStaleGuard();
   const [workOrders, setWorkOrders] = useState<WorkOrderOption[]>([]);
   const [selectedWoId, setSelectedWoId] = useState('');
   const [downloading, setDownloading] = useState(false);
@@ -214,7 +216,7 @@ export default function Downloads() {
         .from('work_order')
         .select('id, download_date, status')
         .order('uploaded_at', { ascending: false });
-      if (err) throw err;
+      if (isStale() || err) { if (err) throw err; return; }
       setWorkOrders((data || []) as WorkOrderOption[]);
       if (data && data.length > 0) setSelectedWoId(data[0].id);
     } catch (err) {
@@ -225,7 +227,7 @@ export default function Downloads() {
   const loadWarehouses = async () => {
     try {
       const { data, error: err } = await supabase.from('warehouse').select('*');
-      if (err) throw err;
+      if (isStale() || err) { if (err) throw err; return; }
       const map: Record<string, any> = {};
       (data || []).forEach((w: any) => (map[w.name] = w));
       setWarehouses(map);
@@ -259,6 +261,8 @@ export default function Downloads() {
           .eq('work_order_id', selectedWoId).eq('action_type', 'shipment_out')
           .order('created_at', { ascending: true }),
       ]);
+
+      if (isStale()) return;
 
       const shipLogs = shipRes.data || [];
       const recLogs = recRes.data || [];
@@ -303,6 +307,7 @@ export default function Downloads() {
       await buildPreviewsForWaveWith(newActivityData, newSelectedWaves);
     } catch (err: any) {
       setError(`데이터 조회 실패: ${err.message || '알 수 없는 오류'}`);
+    } finally {
       setPreviewLoading(false);
     }
   };
@@ -348,6 +353,7 @@ export default function Downloads() {
       const s4SkuMap = await fetchBerrizIds(s4SkuIds);
       const s4Items = mergeLogItems(s4Logs, 'shipQty', s4SkuMap);
 
+      if (isStale()) return;
       setPreviews({
         step1: { transfer: s1Items, adj: s1Items },
         step2: { adj: s2Items },

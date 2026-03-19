@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { supabase } from '../../lib/supabase';
+import { useStaleGuard } from '../../hooks/useStaleGuard';
 import { ChevronLeft, ChevronRight, ChevronDown, ChevronUp } from 'lucide-react';
 
 interface LogEntry {
@@ -59,6 +60,7 @@ const actionColors: Record<string, string> = {
 };
 
 export default function ActivityHistory() {
+  const isStale = useStaleGuard();
   const today = new Date().toISOString().split('T')[0];
   const [selectedDate, setSelectedDate] = useState(today);
   const [logs, setLogs] = useState<LogEntry[]>([]);
@@ -78,7 +80,7 @@ export default function ActivityHistory() {
 
   const loadUsers = async () => {
     const { data } = await supabase.from('user_profile').select('id, name, role');
-    if (data) setUsers(data as any[]);
+    if (!isStale() && data) setUsers(data as any[]);
   };
 
   const loadLogs = async () => {
@@ -96,7 +98,7 @@ export default function ActivityHistory() {
 
       const { data, error } = await query;
       if (error) throw error;
-      setLogs((data || []) as LogEntry[]);
+      if (!isStale()) setLogs((data || []) as LogEntry[]);
     } catch (e: any) {
       console.error('Failed to load activity logs:', e);
     } finally {

@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback } from 'react';
 import { supabase } from '../../lib/supabase';
+import { useStaleGuard } from '../../hooks/useStaleGuard';
 import { recordTransactionBatch, validateTransactionBatch, deleteCjTransactions, countCjTransactions } from '../../lib/inventoryTransaction';
 import type { ValidationError } from '../../lib/inventoryTransaction';
 import { parseCjShipment, parseCjReceipt, parseCjReturn, detectCjFileType } from '../../lib/cjExcelParser';
@@ -24,6 +25,7 @@ interface LedgerRow {
 }
 
 export default function StockLedger() {
+  const isStale = useStaleGuard();
   const today = new Date().toISOString().slice(0, 10);
   const firstDay = today.slice(0, 8) + '01';
 
@@ -215,7 +217,7 @@ export default function StockLedger() {
 
       // 정렬: 창고명 → SKU코드
       ledgerRows.sort((a, b) => a.warehouseName.localeCompare(b.warehouseName) || a.skuId.localeCompare(b.skuId));
-      setRows(ledgerRows);
+      if (!isStale()) setRows(ledgerRows);
     } catch (err: any) {
       console.error('수불부 조회 실패:', err);
       setError(err.message || '수불부 조회 중 오류가 발생했습니다.');

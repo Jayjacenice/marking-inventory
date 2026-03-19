@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { useStaleGuard } from '../../hooks/useStaleGuard';
 import { supabase } from '../../lib/supabase';
 import { Trash2, AlertTriangle, CheckCircle, XCircle, Eye, RotateCcw, Settings } from 'lucide-react';
 import { CardSkeleton } from '../../components/LoadingSkeleton';
@@ -44,6 +45,7 @@ interface RequestDetail {
 }
 
 export default function Dashboard() {
+  const isStale = useStaleGuard();
   const [activeOrders, setActiveOrders] = useState<ActiveOrder[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -87,6 +89,7 @@ export default function Dashboard() {
         .limit(10);
       if (woError) throw woError;
 
+      if (isStale()) return;
       if (woData) {
         setActiveOrders(
           (woData as any[]).map((wo) => ({
