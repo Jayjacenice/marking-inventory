@@ -64,6 +64,10 @@ export function parseCjShipment(wb: XLSX.WorkBook): CjTransaction[] {
     const qty = parseSlashQty(row['최종출고']);
     if (qty <= 0) continue;
 
+    // E열 '명칭' 컬럼으로 판매/이동출고 분류
+    const clientName = String(row['명칭'] ?? '').trim();
+    const isSales = clientName.startsWith('(택배)주식회사 카카오엔터테인먼트');
+
     const refNo = row['KX전표'] ? String(row['KX전표']).trim() : undefined;
     results.push({
       skuId,
@@ -71,7 +75,7 @@ export function parseCjShipment(wb: XLSX.WorkBook): CjTransaction[] {
       skuName: String(row['명칭_1'] ?? row['명칭.1'] ?? '').trim(),
       date: toDateStr(row['배송일자']),
       quantity: qty,
-      type: '출고',
+      type: isSales ? '판매' : '출고',
       refNo,
     });
   }

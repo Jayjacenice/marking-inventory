@@ -282,18 +282,23 @@ export default function StockLedger() {
     let overlapMsg: string | null = null;
 
     if (cjWh) {
-      const { data: existingTx } = await supabase
-        .from('inventory_transaction')
-        .select('memo')
-        .eq('source', 'cj_excel')
-        .eq('warehouse_id', cjWh.id)
-        .eq('tx_type', type);
-
+      // 출고 파일은 판매+출고 두 타입이 섞일 수 있으므로 두 타입 모두 중복 확인
+      const typesToCheck = type === '출고' ? ['출고', '판매'] : [type];
       const existingRefNos = new Set<string>();
-      for (const tx of existingTx || []) {
-        if (tx.memo?.startsWith('CJ:')) {
-          const refNo = tx.memo.split(':')[2];
-          if (refNo) existingRefNos.add(refNo);
+
+      for (const t of typesToCheck) {
+        const { data: existingTx } = await supabase
+          .from('inventory_transaction')
+          .select('memo')
+          .eq('source', 'cj_excel')
+          .eq('warehouse_id', cjWh.id)
+          .eq('tx_type', t);
+
+        for (const tx of existingTx || []) {
+          if (tx.memo?.startsWith('CJ:')) {
+            const refNo = tx.memo.split(':')[2];
+            if (refNo) existingRefNos.add(refNo);
+          }
         }
       }
 
@@ -307,16 +312,20 @@ export default function StockLedger() {
         const minDate = dates[0];
         const maxDate = dates[dates.length - 1];
         if (minDate && maxDate) {
-          const { count } = await supabase
-            .from('inventory_transaction')
-            .select('*', { count: 'exact', head: true })
-            .eq('source', 'cj_excel')
-            .eq('warehouse_id', cjWh.id)
-            .eq('tx_type', type)
-            .gte('tx_date', minDate)
-            .lte('tx_date', maxDate);
-          if (count && count > 0 && skipped === 0) {
-            overlapMsg = `${minDate} ~ ${maxDate} 기간에 이미 ${type} 데이터 ${count}건이 있습니다.`;
+          let totalOverlap = 0;
+          for (const t of typesToCheck) {
+            const { count } = await supabase
+              .from('inventory_transaction')
+              .select('*', { count: 'exact', head: true })
+              .eq('source', 'cj_excel')
+              .eq('warehouse_id', cjWh.id)
+              .eq('tx_type', t)
+              .gte('tx_date', minDate)
+              .lte('tx_date', maxDate);
+            totalOverlap += count || 0;
+          }
+          if (totalOverlap > 0 && skipped === 0) {
+            overlapMsg = `${minDate} ~ ${maxDate} 기간에 이미 출고/판매 데이터 ${totalOverlap}건이 있습니다.`;
           }
         }
       }
@@ -444,13 +453,18 @@ export default function StockLedger() {
   const handleDeletePreview = async (type: TxType, start: string, end: string) => {
     const cjWh = await findCjWarehouse();
     if (!cjWh) return;
-    const count = await countCjTransactions({
-      warehouseId: cjWh.id,
-      txType: type,
-      startDate: start,
-      endDate: end,
-    });
-    setDeletePreviewCount(count);
+    // 출고 삭제 시 판매도 함께 카운트
+    const typesToDelete = type === '출고' ? ['출고', '판매'] as TxType[] : [type];
+    let total = 0;
+    for (const t of typesToDelete) {
+      total += await countCjTransactions({
+        warehouseId: cjWh.id,
+        txType: t,
+        startDate: start,
+        endDate: end,
+      });
+    }
+    setDeletePreviewCount(total);
     setDeleteConfirm(false);
   };
 
@@ -463,18 +477,26 @@ export default function StockLedger() {
       setDeleting(false);
       return;
     }
-    const result = await deleteCjTransactions({
-      warehouseId: cjWh.id,
-      txType: deleteModal.type,
-      startDate: deleteStartDate,
-      endDate: deleteEndDate,
-    });
+    // 출고 삭제 시 판매도 함께 삭제
+    const typesToDelete = deleteModal.type === '출고' ? ['출고', '판매'] as TxType[] : [deleteModal.type];
+    let totalDeleted = 0;
+    let lastError: string | null = null;
+    for (const t of typesToDelete) {
+      const result = await deleteCjTransactions({
+        warehouseId: cjWh.id,
+        txType: t,
+        startDate: deleteStartDate,
+        endDate: deleteEndDate,
+      });
+      if (result.error) lastError = result.error;
+      totalDeleted += result.deleted;
+    }
     setDeleting(false);
     setDeleteModal(null);
-    if (result.error) {
-      setUploadResult(`삭제 실패: ${result.error}`);
+    if (lastError) {
+      setUploadResult(`삭제 실패: ${lastError}`);
     } else {
-      setUploadResult(`${deleteModal.type} 데이터 ${result.deleted}건 삭제 완료`);
+      setUploadResult(`${deleteModal.type} 데이터 ${totalDeleted}건 삭제 완료`);
     }
     fetchLedger();
     fetchCjStatus();
@@ -548,7 +570,7 @@ export default function StockLedger() {
       {(() => {
         const cjTypes: { type: TxType; label: string }[] = [
           { type: '입고', label: '입고' },
-          { type: '출고', label: '출고' },
+          { type: '출고', label: '출고 (판매+이동출고)' },
           { type: '반품', label: '반품' },
         ];
         const getDaysAgo = (dateStr: string) => {
@@ -564,7 +586,21 @@ export default function StockLedger() {
             <h3 className="text-sm font-semibold text-gray-700 mb-3">CJ 물류센터 데이터 관리</h3>
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-3">
               {cjTypes.map(({ type, label }) => {
-                const s = cjStatus[type];
+                // 출고 카드는 판매(CJ) 건수도 합산
+                const s = type === '출고' && (cjStatus['출고'] || cjStatus['판매'])
+                  ? (() => {
+                      const out = cjStatus['출고'];
+                      const sales = cjStatus['판매'];
+                      if (out && sales) {
+                        return {
+                          count: out.count + sales.count,
+                          minDate: out.minDate < sales.minDate ? out.minDate : sales.minDate,
+                          maxDate: out.maxDate > sales.maxDate ? out.maxDate : sales.maxDate,
+                        };
+                      }
+                      return out || sales!;
+                    })()
+                  : cjStatus[type];
                 if (!s) {
                   return (
                     <div key={type} className="bg-gray-50 border border-gray-200 rounded-lg p-3 flex flex-col">
