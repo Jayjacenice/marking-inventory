@@ -87,13 +87,13 @@ function AppContent() {
      *   SIGNED_OUT      - 로그아웃 (로그인 페이지로 navigate)
      *
      * 안전망: GoTrue·loadUserProfile 등이 어떤 이유로든 hang하면
-     * 20초 후 강제로 로딩 해제. (clearTimeout은 cleanup에서만 수행)
+     * 8초 후 강제로 로딩 해제. (clearTimeout은 cleanup에서만 수행)
      * 정상 완료 시 setLoading(false)가 먼저 실행되므로 타이머 발화는 no-op.
      */
     const fallbackTimer = setTimeout(() => {
-      console.warn('[Auth] 전체 초기화 타임아웃 (20s) — 강제 로딩 해제');
+      console.warn('[Auth] 전체 초기화 타임아웃 (8s) — 강제 로딩 해제');
       setLoading(false);
-    }, 20_000);
+    }, 8_000);
 
     const {
       data: { subscription },
