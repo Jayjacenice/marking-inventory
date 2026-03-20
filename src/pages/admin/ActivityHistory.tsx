@@ -37,6 +37,36 @@ const actionLabels: Record<string, string> = {
   rollback_shipment_out: '출고 롤백',
 };
 
+// 각 action_type이 발생한 메뉴(화면) 출처
+const actionSource: Record<string, string> = {
+  shipment_confirm: '오프라인',
+  receipt_check: '플레이위즈',
+  marking_work: '플레이위즈',
+  shipment_out: '플레이위즈',
+  shipment_cancel_request: '오프라인',
+  shipment_cancel_approved: '관리자',
+  shipment_modify_request: '오프라인',
+  shipment_modify_approved: '관리자',
+  inventory_adjust: '관리자',
+  user_create: '관리자',
+  user_update: '관리자',
+  user_delete: '관리자',
+  delete_shipment: '오프라인',
+  delete_receipt: '플레이위즈',
+  delete_marking: '플레이위즈',
+  delete_shipment_out: '플레이위즈',
+  rollback_shipment: '관리자',
+  rollback_receipt: '관리자',
+  rollback_marking: '관리자',
+  rollback_shipment_out: '관리자',
+};
+
+const sourceColors: Record<string, string> = {
+  '오프라인': 'text-orange-600',
+  '플레이위즈': 'text-violet-600',
+  '관리자': 'text-gray-500',
+};
+
 const actionColors: Record<string, string> = {
   shipment_confirm: 'bg-orange-100 text-orange-700',
   receipt_check: 'bg-blue-100 text-blue-700',
@@ -135,10 +165,12 @@ export default function ActivityHistory() {
       const actionLabel = actionLabels[log.action_type] || log.action_type;
       const woDate = log.summary?.workOrderDate || '—';
       const items = log.summary?.items || [];
+      const source = actionSource[log.action_type] || '';
       if (items.length === 0) {
         return [{
           시간: formatTime(log.created_at),
           담당자: userName,
+          메뉴: source,
           유형: actionLabel,
           작업일: woDate,
           품목코드: '',
@@ -149,6 +181,7 @@ export default function ActivityHistory() {
       return items.map((item: any) => ({
         시간: formatTime(log.created_at),
         담당자: userName,
+        메뉴: source,
         유형: actionLabel,
         작업일: woDate,
         품목코드: item.skuId || '',
@@ -157,7 +190,7 @@ export default function ActivityHistory() {
       }));
     });
     const ws = XLSX.utils.json_to_sheet(rows);
-    ws['!cols'] = [{ wch: 8 }, { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 20 }, { wch: 30 }, { wch: 10 }];
+    ws['!cols'] = [{ wch: 8 }, { wch: 12 }, { wch: 10 }, { wch: 12 }, { wch: 12 }, { wch: 20 }, { wch: 30 }, { wch: 10 }];
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, '활동이력');
     XLSX.writeFile(wb, `활동이력_${selectedDate}.xlsx`);
@@ -242,8 +275,13 @@ export default function ActivityHistory() {
                     <span className="text-sm text-gray-700 w-20 flex-shrink-0 truncate">
                       {userName}
                     </span>
-                    <span className={`text-xs px-2 py-0.5 rounded-full font-medium flex-shrink-0 ${actionColors[log.action_type] || 'bg-gray-100 text-gray-600'}`}>
-                      {actionLabels[log.action_type] || log.action_type}
+                    <span className="flex items-center gap-1 flex-shrink-0">
+                      <span className={`text-[10px] font-medium ${sourceColors[actionSource[log.action_type] || ''] || 'text-gray-400'}`}>
+                        {actionSource[log.action_type] || ''}
+                      </span>
+                      <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${actionColors[log.action_type] || 'bg-gray-100 text-gray-600'}`}>
+                        {actionLabels[log.action_type] || log.action_type}
+                      </span>
                     </span>
                     <span className="text-sm text-gray-500 flex-shrink-0">
                       {log.summary?.workOrderDate || '—'}
