@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
-import { supabase } from '../../lib/supabase';
+import { supabaseAdmin } from '../../lib/supabaseAdmin';
 import { useStaleGuard } from '../../hooks/useStaleGuard';
-import { ChevronLeft, ChevronRight, ChevronDown, ChevronUp } from 'lucide-react';
+import { ChevronLeft, ChevronRight, ChevronDown, ChevronUp, Download } from 'lucide-react';
+import * as XLSX from 'xlsx';
 
 interface LogEntry {
   id: string;
@@ -79,14 +80,14 @@ export default function ActivityHistory() {
   }, [selectedDate, actionFilter, userFilter]);
 
   const loadUsers = async () => {
-    const { data } = await supabase.from('user_profile').select('id, name, role');
+    const { data } = await supabaseAdmin.from('user_profile').select('id, name, role');
     if (!isStale() && data) setUsers(data as any[]);
   };
 
   const loadLogs = async () => {
     setLoading(true);
     try {
-      let query = supabase
+      let query = supabaseAdmin
         .from('activity_log')
         .select('*')
         .eq('action_date', selectedDate)
@@ -127,6 +128,41 @@ export default function ActivityHistory() {
     return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
   };
 
+  const handleDownloadExcel = () => {
+    if (logs.length === 0) return;
+    const rows = logs.flatMap((log) => {
+      const userName = users.find((u) => u.id === log.user_id)?.name || '—';
+      const actionLabel = actionLabels[log.action_type] || log.action_type;
+      const woDate = log.summary?.workOrderDate || '—';
+      const items = log.summary?.items || [];
+      if (items.length === 0) {
+        return [{
+          시간: formatTime(log.created_at),
+          담당자: userName,
+          유형: actionLabel,
+          작업일: woDate,
+          품목코드: '',
+          품목명: '',
+          수량: log.summary?.totalQty || 0,
+        }];
+      }
+      return items.map((item: any) => ({
+        시간: formatTime(log.created_at),
+        담당자: userName,
+        유형: actionLabel,
+        작업일: woDate,
+        품목코드: item.skuId || '',
+        품목명: item.skuName || '',
+        수량: item.sentQty || item.actualQty || item.completedQty || item.shipQty || 0,
+      }));
+    });
+    const ws = XLSX.utils.json_to_sheet(rows);
+    ws['!cols'] = [{ wch: 8 }, { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 20 }, { wch: 30 }, { wch: 10 }];
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, '활동이력');
+    XLSX.writeFile(wb, `활동이력_${selectedDate}.xlsx`);
+  };
+
   return (
     <div className="space-y-5 max-w-4xl">
       <h2 className="text-xl font-bold text-gray-900">활동 이력</h2>
@@ -147,8 +183,8 @@ export default function ActivityHistory() {
         </div>
       </div>
 
-      {/* 필터 */}
-      <div className="flex gap-3">
+      {/* 필터 + 엑셀 다운로드 */}
+      <div className="flex gap-3 flex-wrap items-center">
         <select
           value={actionFilter}
           onChange={(e) => setActionFilter(e.target.value)}
@@ -169,6 +205,14 @@ export default function ActivityHistory() {
             <option key={u.id} value={u.id}>{u.name} ({u.role})</option>
           ))}
         </select>
+        <button
+          onClick={handleDownloadExcel}
+          disabled={logs.length === 0}
+          className="ml-auto flex items-center gap-1.5 text-sm px-3 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+        >
+          <Download size={14} />
+          엑셀 다운로드
+        </button>
       </div>
 
       {/* 결과 */}
@@ -195,7 +239,7 @@ export default function ActivityHistory() {
                     <span className="text-xs text-gray-400 font-mono w-12 flex-shrink-0">
                       {formatTime(log.created_at)}
                     </span>
-                    <span className="text-sm text-gray-700 w-16 flex-shrink-0 truncate">
+                    <span className="text-sm text-gray-700 w-20 flex-shrink-0 truncate">
                       {userName}
                     </span>
                     <span className={`text-xs px-2 py-0.5 rounded-full font-medium flex-shrink-0 ${actionColors[log.action_type] || 'bg-gray-100 text-gray-600'}`}>
