@@ -86,6 +86,12 @@ const navItems: NavItem[] = [
     roles: ['admin'],
   },
   {
+    label: '주문 관리',
+    path: '/admin/orders',
+    icon: <ShoppingCart size={18} />,
+    roles: ['admin'],
+  },
+  {
     label: '품목 마스터',
     path: '/admin/sku-master',
     icon: <List size={18} />,

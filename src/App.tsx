@@ -24,6 +24,7 @@ import InventoryManage from './pages/admin/InventoryManage';
 import StockLedger from './pages/admin/StockLedger';
 import SalesUpload from './pages/admin/SalesUpload';
 import SKUMaster from './pages/admin/SKUMaster';
+import OrderUpload from './pages/admin/OrderUpload';
 import type { UserRole, AppUser } from './types';
 
 function AppContent() {
@@ -191,6 +192,7 @@ function AppContent() {
         <Route path="/admin/sales" element={<SalesUpload />} />
         <Route path="/admin/stock-ledger" element={<StockLedger />} />
         <Route path="/admin/sku-master" element={<SKUMaster currentUserId={user.id} />} />
+        <Route path="/admin/orders" element={<OrderUpload currentUserId={user.id} />} />
 
         {/* 오프라인 매장 */}
         <Route path="/offline/shipment" element={<ShipmentConfirm currentUser={user} />} />

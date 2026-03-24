@@ -81,7 +81,23 @@ export interface AppUser {
 }
 
 export type TxType = '입고' | '출고' | '반품' | '재고조정' | '마킹출고' | '마킹입고' | '판매' | '기초재고';
-export type TxSource = 'cj_excel' | 'system' | 'manual' | 'pos_excel' | 'initial_stock' | 'offline_manual';
+export type TxSource = 'cj_excel' | 'system' | 'manual' | 'pos_excel' | 'initial_stock' | 'offline_manual' | 'online_order';
+
+export type OnlineOrderStatus = '신규' | '발송대기' | '이관중' | '마킹중' | '출고완료' | '재고부족' | '하자재발송';
+
+export interface OnlineOrder {
+  id: string;
+  order_number: string;
+  delivery_number: string | null;
+  order_date: string | null;
+  sku_id: string;
+  sku_name: string | null;
+  option_text: string | null;
+  quantity: number;
+  needs_marking: boolean;
+  status: OnlineOrderStatus;
+  created_at: string;
+}
 
 export interface InventoryTransaction {
   id: string;
