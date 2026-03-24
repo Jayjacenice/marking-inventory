@@ -36,11 +36,17 @@ export default function SKUMaster({ currentUserId }: { currentUserId: string }) 
   // 삭제
   const [deleteTarget, setDeleteTarget] = useState<SKU | null>(null);
 
-  // 엑셀 업로드
-  const [uploadPreview, setUploadPreview] = useState<{ changes: { skuId: string; field: string; from: string; to: string }[]; total: number } | null>(null);
+  // 엑셀 업로드 (수정 + 신규등록)
+  const [uploadPreview, setUploadPreview] = useState<{
+    changes: { skuId: string; field: string; from: string; to: string }[];
+    newItems: { skuId: string; skuName: string; barcode: string; type: string }[];
+    updateTotal: number;
+    newTotal: number;
+  } | null>(null);
   const [uploading, setUploading] = useState(false);
-  const [uploadProgress, setUploadProgress] = useState<{ current: number; total: number } | null>(null);
+  const [uploadProgress, setUploadProgress] = useState<{ current: number; total: number; step: string } | null>(null);
   const [uploadData, setUploadData] = useState<any[]>([]);
+  const [uploadNewData, setUploadNewData] = useState<any[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // ── 데이터 로딩 (1000건씩 페이지네이션) ──
@@ -215,21 +221,36 @@ export default function SKUMaster({ currentUserId }: { currentUserId: string }) 
       // 현재 SKU 맵
       const skuMap = new Map(skus.map((s) => [s.sku_id, s]));
 
-      // 변경 감지
+      // 변경 감지 + 신규 감지
       const changes: { skuId: string; field: string; from: string; to: string }[] = [];
       const validRows: any[] = [];
+      const newItems: { skuId: string; skuName: string; barcode: string; type: string }[] = [];
+      const newRows: any[] = [];
 
       for (const row of rows) {
         const skuId = String(row['SKU코드'] || row['sku_id'] || '').trim();
         if (!skuId) continue;
 
-        const existing = skuMap.get(skuId);
-        if (!existing) continue; // 존재하지 않는 SKU는 skip
-
         const newName = String(row['상품명'] || row['sku_name'] || '').trim();
         const newBarcode = String(row['바코드'] || row['barcode'] || '').trim() || null;
         const newType = String(row['타입'] || row['type'] || '').trim();
 
+        const existing = skuMap.get(skuId);
+        if (!existing) {
+          // 신규 등록 대상
+          if (newName) {
+            newItems.push({
+              skuId,
+              skuName: newName,
+              barcode: newBarcode || '',
+              type: (newType && SKU_TYPES.includes(newType as any)) ? newType : '완제품',
+            });
+            newRows.push(row);
+          }
+          continue;
+        }
+
+        // 기존 SKU → 변경 감지
         let hasChange = false;
         if (newName && newName !== existing.sku_name) {
           changes.push({ skuId, field: '상품명', from: existing.sku_name, to: newName });
@@ -247,20 +268,42 @@ export default function SKUMaster({ currentUserId }: { currentUserId: string }) 
       }
 
       setUploadData(validRows);
-      setUploadPreview({ changes, total: validRows.length });
+      setUploadNewData(newRows);
+      setUploadPreview({ changes, newItems, updateTotal: validRows.length, newTotal: newRows.length });
     } catch (err: any) {
       setMessage({ type: 'error', text: `파싱 오류: ${err.message}` });
     }
   };
 
   const handleUploadSave = async () => {
-    if (!uploadPreview || uploadData.length === 0) return;
+    if (!uploadPreview || (uploadData.length === 0 && uploadNewData.length === 0)) return;
     setUploading(true);
-    setUploadProgress({ current: 0, total: uploadData.length });
+    const totalWork = uploadData.length + uploadNewData.length;
+    setUploadProgress({ current: 0, total: totalWork, step: '신규 등록 중...' });
 
     try {
-      let ok = 0;
-      let failed = 0;
+      let newOk = 0, newFailed = 0, updateOk = 0, updateFailed = 0;
+
+      // 1단계: 신규 등록
+      for (let idx = 0; idx < uploadNewData.length; idx++) {
+        const row = uploadNewData[idx];
+        const skuId = String(row['SKU코드'] || row['sku_id'] || '').trim();
+        const name = String(row['상품명'] || row['sku_name'] || '').trim();
+        const barcode = String(row['바코드'] || row['barcode'] || '').trim() || null;
+        const type = String(row['타입'] || row['type'] || '').trim();
+
+        const { error } = await supabaseAdmin.from('sku').insert({
+          sku_id: skuId,
+          sku_name: name,
+          barcode,
+          type: (type && SKU_TYPES.includes(type as any)) ? type : '완제품',
+        });
+        if (!error) newOk++; else newFailed++;
+        setUploadProgress({ current: idx + 1, total: totalWork, step: `신규 등록 중... (${idx + 1}/${uploadNewData.length})` });
+      }
+
+      // 2단계: 기존 수정
+      setUploadProgress({ current: uploadNewData.length, total: totalWork, step: '기존 수정 중...' });
       for (let idx = 0; idx < uploadData.length; idx++) {
         const row = uploadData[idx];
         const skuId = String(row['SKU코드'] || row['sku_id'] || '').trim();
@@ -272,30 +315,31 @@ export default function SKUMaster({ currentUserId }: { currentUserId: string }) 
         if (newName) updates.sku_name = newName;
         if (newBarcode !== undefined) updates.barcode = newBarcode;
         if (newType && SKU_TYPES.includes(newType as any)) updates.type = newType;
-
         if (Object.keys(updates).length === 0) continue;
 
-        const { error } = await supabaseAdmin
-          .from('sku')
-          .update(updates)
-          .eq('sku_id', skuId);
-        if (!error) ok++; else failed++;
-        setUploadProgress({ current: idx + 1, total: uploadData.length });
+        const { error } = await supabaseAdmin.from('sku').update(updates).eq('sku_id', skuId);
+        if (!error) updateOk++; else updateFailed++;
+        setUploadProgress({ current: uploadNewData.length + idx + 1, total: totalWork, step: `기존 수정 중... (${idx + 1}/${uploadData.length})` });
       }
 
       supabase.from('activity_log').insert({
         user_id: currentUserId,
         action_type: 'sku_bulk_edit',
         action_date: new Date().toISOString().split('T')[0],
-        summary: { count: ok, changes: uploadPreview.changes.length },
+        summary: { newCount: newOk, updateCount: updateOk, changes: uploadPreview.changes.length },
       }).then(() => {});
 
-      setMessage({ type: 'success', text: `일괄수정 완료: ${ok}건 성공${failed > 0 ? `, ${failed}건 실패` : ''}` });
+      const parts: string[] = [];
+      if (newOk > 0) parts.push(`신규 ${newOk}건`);
+      if (updateOk > 0) parts.push(`수정 ${updateOk}건`);
+      if (newFailed + updateFailed > 0) parts.push(`실패 ${newFailed + updateFailed}건`);
+      setMessage({ type: 'success', text: `완료: ${parts.join(', ')}` });
       setUploadPreview(null);
       setUploadData([]);
+      setUploadNewData([]);
       loadSkus();
     } catch (err: any) {
-      setMessage({ type: 'error', text: `일괄수정 실패: ${err.message}` });
+      setMessage({ type: 'error', text: `처리 실패: ${err.message}` });
     } finally {
       setUploading(false);
       setUploadProgress(null);
@@ -374,7 +418,7 @@ export default function SKUMaster({ currentUserId }: { currentUserId: string }) 
           onClick={() => fileInputRef.current?.click()}
           className="flex items-center gap-1.5 px-4 py-2.5 bg-indigo-600 text-white rounded-xl text-sm hover:bg-indigo-700"
         >
-          <Upload size={14} /> 엑셀 일괄수정
+          <Upload size={14} /> 엑셀 등록/수정
         </button>
         <input ref={fileInputRef} type="file" accept=".xlsx,.xls" onChange={handleUpload} className="hidden" />
       </div>
@@ -382,40 +426,90 @@ export default function SKUMaster({ currentUserId }: { currentUserId: string }) 
       {/* 엑셀 업로드 미리보기 */}
       {uploadPreview && (
         <div className="bg-yellow-50 border border-yellow-200 rounded-xl p-4 mb-4">
-          <h3 className="font-semibold text-yellow-800 mb-2">일괄수정 미리보기</h3>
-          <p className="text-sm text-yellow-700 mb-2">
-            {uploadPreview.total}건 SKU, {uploadPreview.changes.length}건 변경사항
-          </p>
-          <div className="max-h-[200px] overflow-y-auto text-xs">
-            <table className="w-full">
-              <thead>
-                <tr className="bg-yellow-100">
-                  <th className="px-2 py-1 text-left">SKU코드</th>
-                  <th className="px-2 py-1 text-left">필드</th>
-                  <th className="px-2 py-1 text-left">기존값</th>
-                  <th className="px-2 py-1 text-left">변경값</th>
-                </tr>
-              </thead>
-              <tbody>
-                {uploadPreview.changes.slice(0, 50).map((c, i) => (
-                  <tr key={i} className="border-t border-yellow-100">
-                    <td className="px-2 py-1 font-mono">{c.skuId}</td>
-                    <td className="px-2 py-1">{c.field}</td>
-                    <td className="px-2 py-1 text-gray-500">{c.from || '(없음)'}</td>
-                    <td className="px-2 py-1 font-semibold text-indigo-700">{c.to || '(없음)'}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-            {uploadPreview.changes.length > 50 && (
-              <p className="text-center text-yellow-600 mt-1">... 외 {uploadPreview.changes.length - 50}건</p>
+          <h3 className="font-semibold text-yellow-800 mb-2">엑셀 업로드 미리보기</h3>
+          <div className="flex gap-4 text-sm text-yellow-700 mb-3">
+            {uploadPreview.newTotal > 0 && (
+              <span className="px-2 py-0.5 bg-green-100 text-green-700 rounded-full font-semibold">
+                신규 등록 {uploadPreview.newTotal}건
+              </span>
+            )}
+            {uploadPreview.updateTotal > 0 && (
+              <span className="px-2 py-0.5 bg-blue-100 text-blue-700 rounded-full font-semibold">
+                수정 {uploadPreview.updateTotal}건 ({uploadPreview.changes.length}건 변경)
+              </span>
+            )}
+            {uploadPreview.newTotal === 0 && uploadPreview.updateTotal === 0 && (
+              <span className="text-gray-500">변경사항이 없습니다.</span>
             )}
           </div>
+
+          <div className="max-h-[300px] overflow-y-auto text-xs space-y-3">
+            {/* 신규 등록 */}
+            {uploadPreview.newItems.length > 0 && (
+              <div>
+                <p className="font-semibold text-green-700 mb-1">신규 등록</p>
+                <table className="w-full">
+                  <thead>
+                    <tr className="bg-green-100">
+                      <th className="px-2 py-1 text-left">SKU코드</th>
+                      <th className="px-2 py-1 text-left">바코드</th>
+                      <th className="px-2 py-1 text-left">상품명</th>
+                      <th className="px-2 py-1 text-left">타입</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {uploadPreview.newItems.slice(0, 30).map((item, i) => (
+                      <tr key={i} className="border-t border-green-100">
+                        <td className="px-2 py-1 font-mono">{item.skuId}</td>
+                        <td className="px-2 py-1 font-mono text-gray-500">{item.barcode || '-'}</td>
+                        <td className="px-2 py-1">{item.skuName}</td>
+                        <td className="px-2 py-1">{item.type}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                {uploadPreview.newItems.length > 30 && (
+                  <p className="text-center text-green-600 mt-1">... 외 {uploadPreview.newItems.length - 30}건</p>
+                )}
+              </div>
+            )}
+
+            {/* 기존 수정 */}
+            {uploadPreview.changes.length > 0 && (
+              <div>
+                <p className="font-semibold text-blue-700 mb-1">기존 수정</p>
+                <table className="w-full">
+                  <thead>
+                    <tr className="bg-blue-100">
+                      <th className="px-2 py-1 text-left">SKU코드</th>
+                      <th className="px-2 py-1 text-left">필드</th>
+                      <th className="px-2 py-1 text-left">기존값</th>
+                      <th className="px-2 py-1 text-left">변경값</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {uploadPreview.changes.slice(0, 30).map((c, i) => (
+                      <tr key={i} className="border-t border-blue-100">
+                        <td className="px-2 py-1 font-mono">{c.skuId}</td>
+                        <td className="px-2 py-1">{c.field}</td>
+                        <td className="px-2 py-1 text-gray-500">{c.from || '(없음)'}</td>
+                        <td className="px-2 py-1 font-semibold text-indigo-700">{c.to || '(없음)'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                {uploadPreview.changes.length > 30 && (
+                  <p className="text-center text-blue-600 mt-1">... 외 {uploadPreview.changes.length - 30}건</p>
+                )}
+              </div>
+            )}
+          </div>
+
           {/* 진행 현황 */}
           {uploadProgress && (
             <div className="mt-3 space-y-1">
               <div className="flex items-center justify-between text-xs text-yellow-700">
-                <span>처리 중... {uploadProgress.current} / {uploadProgress.total}</span>
+                <span>{uploadProgress.step} {uploadProgress.current} / {uploadProgress.total}</span>
                 <span>{Math.round((uploadProgress.current / uploadProgress.total) * 100)}%</span>
               </div>
               <div className="w-full bg-yellow-200 rounded-full h-2.5">
@@ -429,15 +523,15 @@ export default function SKUMaster({ currentUserId }: { currentUserId: string }) 
           <div className="flex gap-2 mt-3">
             <button
               onClick={handleUploadSave}
-              disabled={uploading}
+              disabled={uploading || (uploadPreview.newTotal === 0 && uploadPreview.updateTotal === 0)}
               className="px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm hover:bg-indigo-700 disabled:bg-gray-300"
             >
               {uploading
                 ? `처리 중 (${uploadProgress?.current || 0}/${uploadProgress?.total || 0})`
-                : `${uploadPreview.total}건 일괄수정`}
+                : `실행 (신규 ${uploadPreview.newTotal} + 수정 ${uploadPreview.updateTotal})`}
             </button>
             <button
-              onClick={() => { setUploadPreview(null); setUploadData([]); }}
+              onClick={() => { setUploadPreview(null); setUploadData([]); setUploadNewData([]); }}
               disabled={uploading}
               className="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg text-sm hover:bg-gray-300 disabled:opacity-50"
             >
