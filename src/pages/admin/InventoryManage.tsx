@@ -316,10 +316,10 @@ export default function InventoryManage({ currentUserId }: { currentUserId: stri
           warehouse_id: warehouseId,
           sku_id: item.skuId!,
           tx_type: '기초재고',
-          quantity: item.diff,
+          quantity: item.newQty,
           source: 'initial_stock',
           tx_date: uploadDate,
-          memo: `기초재고: ${item.currentQty} → ${item.newQty}`,
+          memo: `기초재고: ${item.newQty}`,
         }));
 
         const { error: txErr } = await supabase
