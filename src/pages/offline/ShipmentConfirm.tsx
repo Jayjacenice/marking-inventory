@@ -213,16 +213,8 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
               const available = offlineInvMap[comp.compSkuId] || 0;
               totalShippable += Math.max(0, Math.min(needed, available));
             }
-          } else if (l.needs_marking && l.finished_sku_id?.includes('_')) {
-            // BOM 미등록 마킹 완제품 → 패턴 추정
-            const base = l.finished_sku_id.split('_')[0];
-            const mk = base.replace('26UN-', '26MK-');
-            for (const compId of [base, mk]) {
-              const alreadySent = detail[compId] || 0;
-              const needed = ordQty - alreadySent;
-              const available = offlineInvMap[compId] || 0;
-              totalShippable += Math.max(0, Math.min(needed, available));
-            }
+          } else if (l.needs_marking) {
+            // BOM 미등록 마킹 → selectOrder에서도 표시 안 되므로 skip
           } else if (isUniformRelated(l.finished_sku_id)) {
             // 유니폼/마킹키트 단품만 (악세서리 등 비유니폼 제외)
             const alreadySent = detail[l.finished_sku_id] || 0;
