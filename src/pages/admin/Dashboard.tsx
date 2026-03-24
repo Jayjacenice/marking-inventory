@@ -120,11 +120,27 @@ export default function Dashboard({ currentUser }: DashboardProps) {
       const onProgress: ProgressCallback = (current, total, step) => {
         setRollbackProgress({ current, total, step });
       };
+
+      // 온라인 주문 복원: work_order_id 연결된 주문을 '신규'로 되돌림
+      const { supabaseAdmin } = await import('../../lib/supabaseAdmin');
+      const { data: linkedOrders } = await supabaseAdmin
+        .from('online_order')
+        .select('id')
+        .eq('work_order_id', wo.id);
+      if (linkedOrders && linkedOrders.length > 0) {
+        await supabaseAdmin
+          .from('online_order')
+          .update({ work_order_id: null, status: '신규' })
+          .eq('work_order_id', wo.id);
+      }
+
       const result = await deleteWorkOrderCompletely(
         wo.id, wo.downloadDate, wo.status as any, currentUser.id, onProgress
       );
       if (!result.success) {
         setError(result.error || '삭제 실패');
+      } else {
+        setSuccessMsg(`작업지시서 삭제 완료${linkedOrders?.length ? ` (주문 ${linkedOrders.length}건 → 신규 복원)` : ''}`);
       }
       await loadData();
     } catch (e: any) {
@@ -180,6 +196,22 @@ export default function Dashboard({ currentUser }: DashboardProps) {
           return;
         }
       }
+      // 온라인 주문 상태도 롤백
+      const { supabaseAdmin } = await import('../../lib/supabaseAdmin');
+      const rollbackStatusMap: Record<string, { from: string; to: string }> = {
+        '발송': { from: '이관중', to: '발송대기' },
+        '입고': { from: '마킹중', to: '이관중' },
+        '출고': { from: '출고완료', to: '마킹중' },
+      };
+      const mapping = rollbackStatusMap[step];
+      if (mapping) {
+        await supabaseAdmin
+          .from('online_order')
+          .update({ status: mapping.to })
+          .eq('work_order_id', manageOrder.id)
+          .eq('status', mapping.from);
+      }
+
       setSuccessMsg(`${step} 롤백이 완료되었습니다.`);
       setManageOrder(null);
       setRollbackConfirm(false);
