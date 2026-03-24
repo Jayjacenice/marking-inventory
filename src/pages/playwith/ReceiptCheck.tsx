@@ -560,6 +560,12 @@ export default function ReceiptCheck({ currentUser }: { currentUser: AppUser }) 
         date: selectedOrder.download_date,
         items: items.filter((i) => i.actualQty > 0).map((i) => ({ name: i.skuName, qty: i.actualQty })),
       }).catch(() => {});
+
+      // 온라인 주문 상태 업데이트: 이관중 → 마킹중 (FIFO)
+      import('../../lib/onlineOrderSync').then(({ updateOnlineOrderBySkus }) => {
+        const skuIds = items.filter((i) => i.actualQty > 0).map((i) => i.skuId);
+        updateOnlineOrderBySkus(skuIds, '마킹중', '이관중').catch(() => {});
+      });
     } catch (e: any) {
       setError(`입고 확인 처리 실패: ${e.message || '알 수 없는 오류'}. 잠시 후 다시 시도해주세요.`);
     } finally {

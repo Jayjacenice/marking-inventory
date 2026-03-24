@@ -445,6 +445,12 @@ export default function ShipmentOut({ currentUser }: { currentUser: AppUser }) {
         items: shippedItems.map((i) => ({ name: i.skuName, qty: i.shipQty })),
         extra: selectedWo.status === '마킹중' ? '_부분 출고 (마킹 진행 중)_' : undefined,
       }).catch(() => {});
+
+      // 온라인 주문 상태 업데이트: 마킹중 → 출고완료 (FIFO)
+      import('../../lib/onlineOrderSync').then(({ updateOnlineOrderBySkus }) => {
+        const skuIds = shippedItems.map((i) => i.finishedSkuId);
+        updateOnlineOrderBySkus(skuIds, '출고완료', '마킹중').catch(() => {});
+      });
     } catch (e: any) {
       setError(`출고 처리 실패: ${e.message || '알 수 없는 오류'}. 잠시 후 다시 시도해주세요.`);
     } finally {

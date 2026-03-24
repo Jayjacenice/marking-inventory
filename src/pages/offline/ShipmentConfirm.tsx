@@ -1058,6 +1058,15 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
         date: `전체 (${affectedWoIds.length}건)`,
         items: finalItems.filter((i) => i.sentQty > 0).map((i) => ({ name: i.skuName, qty: i.sentQty })),
       }).catch(() => {});
+
+      // 온라인 주문 상태 업데이트: 신규 → 이관중 (FIFO)
+      import('../../lib/onlineOrderSync').then(({ updateOnlineOrderStatus }) => {
+        updateOnlineOrderStatus(
+          finalItems.filter((i) => i.sentQty > 0).map((i) => ({ skuId: i.skuId, qty: i.sentQty })),
+          '이관중',
+          '신규',
+        ).catch(() => {});
+      });
     } catch (e: any) {
       setError(`전체 발송 처리 실패: ${e.message || '알 수 없는 오류'}. 잠시 후 다시 시도해주세요.`);
     } finally {
@@ -1289,6 +1298,15 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
         date: selectedWo.download_date,
         items: finalItems.filter((i) => i.sentQty > 0).map((i) => ({ name: i.skuName, qty: i.sentQty })),
       }).catch(() => {});
+
+      // 온라인 주문 상태 업데이트: 신규 → 이관중 (FIFO)
+      import('../../lib/onlineOrderSync').then(({ updateOnlineOrderStatus }) => {
+        updateOnlineOrderStatus(
+          finalItems.filter((i) => i.sentQty > 0).map((i) => ({ skuId: i.skuId, qty: i.sentQty })),
+          '이관중',
+          '신규',
+        ).catch(() => {});
+      });
     } catch (e: any) {
       setError(`발송 처리 실패: ${e.message || '알 수 없는 오류'}. 잠시 후 다시 시도해주세요.`);
     } finally {
