@@ -170,31 +170,65 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
         }
       }
 
-      // BOM 전개 후 잔량 계산 헬퍼 (sent_detail 기반)
+      // 오프라인 재고 조회 (발송 가능한 수량만 잔량에 포함)
+      const { data: offWh } = await supabase.from('warehouse').select('id').eq('name', '오프라인샵').maybeSingle();
+      const offWhId = (offWh as any)?.id;
+      const offlineInvMap: Record<string, number> = {};
+      if (offWhId) {
+        const { data: invData } = await supabase.from('inventory').select('sku_id, quantity').eq('warehouse_id', offWhId);
+        for (const inv of (invData || []) as any[]) offlineInvMap[inv.sku_id] = inv.quantity;
+      }
+
+      // BOM 상세 (구성품 SKU 매핑)
+      const bomDetailMap: Record<string, { compSkuId: string; qty: number }[]> = {};
+      if (markingSkuArr.length > 0) {
+        const { data: bomDetailData } = await supabase.from('bom')
+          .select('finished_sku_id, component_sku_id, quantity')
+          .in('finished_sku_id', markingSkuArr);
+        for (const b of (bomDetailData || []) as any[]) {
+          if (!bomDetailMap[b.finished_sku_id]) bomDetailMap[b.finished_sku_id] = [];
+          bomDetailMap[b.finished_sku_id].push({ compSkuId: b.component_sku_id, qty: b.quantity || 1 });
+        }
+      }
+
+      // BOM 전개 후 잔량 계산 헬퍼 (재고 있는 것만 카운트)
       const enrichWo = (wo: any): ActiveWorkOrder => {
         const lines = wo.work_order_line || [];
         const lineCount = lines.length;
         const detail: Record<string, number> = wo.sent_detail || {};
 
-        // 1. BOM 전개 후 총 주문량 계산 (구성품 기준)
-        let totalOrdered = 0;
+        // 구성품 레벨로 전개 후, 재고 있는 것만 잔량 계산
+        let totalShippable = 0;
         for (const l of lines) {
-          if (l.needs_marking && bomMap[l.finished_sku_id]) {
-            // BOM 등록됨 → 구성품 수 적용
-            totalOrdered += (l.ordered_qty || 0) * bomMap[l.finished_sku_id];
+          const ordQty = l.ordered_qty || 0;
+          if (l.needs_marking && bomDetailMap[l.finished_sku_id]) {
+            // BOM 등록됨 → 각 구성품 재고 체크
+            for (const comp of bomDetailMap[l.finished_sku_id]) {
+              const alreadySent = detail[comp.compSkuId] || 0;
+              const needed = comp.qty * ordQty - alreadySent;
+              const available = offlineInvMap[comp.compSkuId] || 0;
+              totalShippable += Math.max(0, Math.min(needed, available));
+            }
           } else if (l.needs_marking && l.finished_sku_id?.includes('_')) {
-            // BOM 미등록 마킹 완제품 → 유니폼+마킹키트 = 2배
-            totalOrdered += (l.ordered_qty || 0) * 2;
+            // BOM 미등록 마킹 완제품 → 패턴 추정
+            const base = l.finished_sku_id.split('_')[0];
+            const mk = base.replace('26UN-', '26MK-');
+            for (const compId of [base, mk]) {
+              const alreadySent = detail[compId] || 0;
+              const needed = ordQty - alreadySent;
+              const available = offlineInvMap[compId] || 0;
+              totalShippable += Math.max(0, Math.min(needed, available));
+            }
           } else {
-            totalOrdered += (l.ordered_qty || 0);
+            // 단품
+            const alreadySent = detail[l.finished_sku_id] || 0;
+            const needed = ordQty - alreadySent;
+            const available = offlineInvMap[l.finished_sku_id] || 0;
+            totalShippable += Math.max(0, Math.min(needed, available));
           }
         }
 
-        // 2. sent_detail 합계 = 이미 발송된 구성품 수량
-        const totalSent = Object.values(detail).reduce((s: number, v: any) => s + (v || 0), 0);
-
-        const remainingQty = Math.max(0, totalOrdered - totalSent);
-        return { id: wo.id, download_date: wo.download_date, status: wo.status, lineCount, remainingQty };
+        return { id: wo.id, download_date: wo.download_date, status: wo.status, lineCount, remainingQty: totalShippable };
       };
 
       // 잔량 있는 건 필터 (enrichWo에서 계산된 remainingQty > 0)
