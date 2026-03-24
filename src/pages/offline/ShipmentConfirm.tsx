@@ -191,7 +191,11 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
         }
       }
 
-      // BOM 전개 후 잔량 계산 헬퍼 (재고 있는 것만 카운트)
+      // 유니폼 관련 SKU 판별 (오프라인 매장에서 발송 대상)
+      const isUniformRelated = (skuId: string) =>
+        skuId?.startsWith('26UN-') || skuId?.startsWith('26MK-');
+
+      // BOM 전개 후 잔량 계산 헬퍼 (유니폼만 + 재고 있는 것만 카운트)
       const enrichWo = (wo: any): ActiveWorkOrder => {
         const lines = wo.work_order_line || [];
         const lineCount = lines.length;
@@ -219,13 +223,14 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
               const available = offlineInvMap[compId] || 0;
               totalShippable += Math.max(0, Math.min(needed, available));
             }
-          } else {
-            // 단품
+          } else if (isUniformRelated(l.finished_sku_id)) {
+            // 유니폼/마킹키트 단품만 (악세서리 등 비유니폼 제외)
             const alreadySent = detail[l.finished_sku_id] || 0;
             const needed = ordQty - alreadySent;
             const available = offlineInvMap[l.finished_sku_id] || 0;
             totalShippable += Math.max(0, Math.min(needed, available));
           }
+          // 비유니폼 단품 (26AC, 26AP 등)은 오프라인 발송 대상 아님 → skip
         }
 
         return { id: wo.id, download_date: wo.download_date, status: wo.status, lineCount, remainingQty: totalShippable };
@@ -368,6 +373,10 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
             componentMap[key].needed += bom.quantity * (line.ordered_qty || 0);
           }
         } else {
+          // 비유니폼 단품 (악세서리 등)은 오프라인 발송 대상 아님 → skip
+          const skuId = line.finished_sku_id as string;
+          if (!skuId?.startsWith('26UN-') && !skuId?.startsWith('26MK-')) continue;
+
           const key = line.finished_sku_id;
           if (!componentMap[key]) {
             componentMap[key] = {
