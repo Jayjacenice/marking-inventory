@@ -39,6 +39,7 @@ export default function SKUMaster({ currentUserId }: { currentUserId: string }) 
   // 엑셀 업로드
   const [uploadPreview, setUploadPreview] = useState<{ changes: { skuId: string; field: string; from: string; to: string }[]; total: number } | null>(null);
   const [uploading, setUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState<{ current: number; total: number } | null>(null);
   const [uploadData, setUploadData] = useState<any[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -255,10 +256,13 @@ export default function SKUMaster({ currentUserId }: { currentUserId: string }) 
   const handleUploadSave = async () => {
     if (!uploadPreview || uploadData.length === 0) return;
     setUploading(true);
+    setUploadProgress({ current: 0, total: uploadData.length });
 
     try {
       let ok = 0;
-      for (const row of uploadData) {
+      let failed = 0;
+      for (let idx = 0; idx < uploadData.length; idx++) {
+        const row = uploadData[idx];
         const skuId = String(row['SKU코드'] || row['sku_id'] || '').trim();
         const newName = String(row['상품명'] || row['sku_name'] || '').trim();
         const newBarcode = String(row['바코드'] || row['barcode'] || '').trim() || null;
@@ -275,7 +279,8 @@ export default function SKUMaster({ currentUserId }: { currentUserId: string }) 
           .from('sku')
           .update(updates)
           .eq('sku_id', skuId);
-        if (!error) ok++;
+        if (!error) ok++; else failed++;
+        setUploadProgress({ current: idx + 1, total: uploadData.length });
       }
 
       supabase.from('activity_log').insert({
@@ -285,7 +290,7 @@ export default function SKUMaster({ currentUserId }: { currentUserId: string }) 
         summary: { count: ok, changes: uploadPreview.changes.length },
       }).then(() => {});
 
-      setMessage({ type: 'success', text: `일괄수정 완료: ${ok}건` });
+      setMessage({ type: 'success', text: `일괄수정 완료: ${ok}건 성공${failed > 0 ? `, ${failed}건 실패` : ''}` });
       setUploadPreview(null);
       setUploadData([]);
       loadSkus();
@@ -293,6 +298,7 @@ export default function SKUMaster({ currentUserId }: { currentUserId: string }) 
       setMessage({ type: 'error', text: `일괄수정 실패: ${err.message}` });
     } finally {
       setUploading(false);
+      setUploadProgress(null);
     }
   };
 
@@ -405,17 +411,35 @@ export default function SKUMaster({ currentUserId }: { currentUserId: string }) 
               <p className="text-center text-yellow-600 mt-1">... 외 {uploadPreview.changes.length - 50}건</p>
             )}
           </div>
+          {/* 진행 현황 */}
+          {uploadProgress && (
+            <div className="mt-3 space-y-1">
+              <div className="flex items-center justify-between text-xs text-yellow-700">
+                <span>처리 중... {uploadProgress.current} / {uploadProgress.total}</span>
+                <span>{Math.round((uploadProgress.current / uploadProgress.total) * 100)}%</span>
+              </div>
+              <div className="w-full bg-yellow-200 rounded-full h-2.5">
+                <div
+                  className="bg-indigo-600 h-2.5 rounded-full transition-all"
+                  style={{ width: `${(uploadProgress.current / uploadProgress.total) * 100}%` }}
+                />
+              </div>
+            </div>
+          )}
           <div className="flex gap-2 mt-3">
             <button
               onClick={handleUploadSave}
               disabled={uploading}
               className="px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm hover:bg-indigo-700 disabled:bg-gray-300"
             >
-              {uploading ? '저장 중...' : `${uploadPreview.total}건 일괄수정`}
+              {uploading
+                ? `처리 중 (${uploadProgress?.current || 0}/${uploadProgress?.total || 0})`
+                : `${uploadPreview.total}건 일괄수정`}
             </button>
             <button
               onClick={() => { setUploadPreview(null); setUploadData([]); }}
-              className="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg text-sm hover:bg-gray-300"
+              disabled={uploading}
+              className="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg text-sm hover:bg-gray-300 disabled:opacity-50"
             >
               취소
             </button>
