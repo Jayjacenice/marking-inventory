@@ -8,7 +8,7 @@ import type { OnlineOrder } from '../../types';
 import * as XLSX from 'xlsx';
 import {
   ShoppingCart, Upload, Download, Search, AlertTriangle, CheckCircle,
-  Package, X, FileUp,
+  Package, X, FileUp, XCircle,
 } from 'lucide-react';
 
 export default function OrderUpload({ currentUserId }: { currentUserId: string }) {
@@ -35,6 +35,10 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
   const [dashLoading, setDashLoading] = useState(true);
   const [statusFilter, setStatusFilter] = useState('전체');
   const [searchText, setSearchText] = useState('');
+
+  // 취소
+  const [cancelTarget, setCancelTarget] = useState<{ orderNumber: string; deliveryNumber: string | null; items: OnlineOrder[] } | null>(null);
+  const [cancelling, setCancelling] = useState(false);
 
   // ── 대시보드 로딩 ──
   const loadDashboard = useCallback(async () => {
@@ -246,6 +250,40 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
     XLSX.writeFile(wb, `BOM미등록_${new Date().toISOString().slice(0, 10)}.xlsx`);
   };
 
+  // ── 주문 취소 ──
+  const openCancelModal = (orderNumber: string) => {
+    const items = orders.filter(o => o.order_number === orderNumber);
+    if (items.length === 0) return;
+    setCancelTarget({ orderNumber, deliveryNumber: items[0].delivery_number, items });
+  };
+
+  const handleCancel = async () => {
+    if (!cancelTarget) return;
+    setCancelling(true);
+    try {
+      const { error } = await supabaseAdmin
+        .from('online_order')
+        .update({ status: '취소' })
+        .eq('order_number', cancelTarget.orderNumber);
+      if (error) throw error;
+
+      supabase.from('activity_log').insert({
+        user_id: currentUserId,
+        action_type: 'order_cancel',
+        action_date: new Date().toISOString().split('T')[0],
+        summary: { order_number: cancelTarget.orderNumber, items: cancelTarget.items.length },
+      }).then(() => {});
+
+      setMessage({ type: 'success', text: `주문 ${cancelTarget.orderNumber} 취소 완료 (${cancelTarget.items.length}건)` });
+      setCancelTarget(null);
+      loadDashboard();
+    } catch (err: any) {
+      setMessage({ type: 'error', text: `취소 실패: ${err.message}` });
+    } finally {
+      setCancelling(false);
+    }
+  };
+
   // ── 상태 색상 ──
   const statusColor: Record<string, string> = {
     '신규': 'bg-blue-50 text-blue-700',
@@ -255,6 +293,7 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
     '출고완료': 'bg-green-50 text-green-700',
     '재고부족': 'bg-red-50 text-red-700',
     '하자재발송': 'bg-orange-50 text-orange-700',
+    '취소': 'bg-gray-100 text-gray-500 line-through',
   };
 
   return (
@@ -421,7 +460,7 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
 
         {/* 상태별 카드 */}
         <div className="grid grid-cols-3 sm:grid-cols-7 gap-2 mb-4">
-          {['신규', '발송대기', '이관중', '마킹중', '출고완료', '재고부족', '하자재발송'].map(status => (
+          {['신규', '발송대기', '이관중', '마킹중', '출고완료', '재고부족', '취소'].map(status => (
             <button
               key={status}
               onClick={() => setStatusFilter(statusFilter === status ? '전체' : status)}
@@ -460,13 +499,14 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
                 <th className="px-2 py-2 text-right">수량</th>
                 <th className="px-2 py-2 text-center">마킹</th>
                 <th className="px-2 py-2 text-center">상태</th>
+                <th className="px-2 py-2 text-center w-[60px]">액션</th>
               </tr>
             </thead>
             <tbody>
               {dashLoading ? (
-                <tr><td colSpan={8} className="px-4 py-12 text-center text-gray-400">불러오는 중...</td></tr>
+                <tr><td colSpan={9} className="px-4 py-12 text-center text-gray-400">불러오는 중...</td></tr>
               ) : filtered.length === 0 ? (
-                <tr><td colSpan={8} className="px-4 py-12 text-center text-gray-400">
+                <tr><td colSpan={9} className="px-4 py-12 text-center text-gray-400">
                   {totalCount === 0 ? '등록된 주문이 없습니다. 엑셀을 업로드하세요.' : '검색 결과가 없습니다.'}
                 </td></tr>
               ) : (
@@ -486,6 +526,17 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
                         {o.status}
                       </span>
                     </td>
+                    <td className="px-2 py-1.5 text-center">
+                      {o.status !== '취소' && o.status !== '출고완료' && (
+                        <button
+                          onClick={() => openCancelModal(o.order_number)}
+                          className="p-1 text-red-400 hover:bg-red-50 rounded"
+                          title="주문 취소"
+                        >
+                          <XCircle size={14} />
+                        </button>
+                      )}
+                    </td>
                   </tr>
                 ))
               )}
@@ -496,6 +547,46 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
           <p className="text-center text-sm text-gray-400 mt-2">상위 200건 표시 (전체 {filtered.length.toLocaleString()}건)</p>
         )}
       </div>
+
+      {/* 취소 확인 모달 */}
+      {cancelTarget && (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50" onClick={() => setCancelTarget(null)}>
+          <div className="bg-white rounded-2xl shadow-xl p-6 w-full max-w-md mx-4" onClick={(e) => e.stopPropagation()}>
+            <h3 className="text-lg font-bold text-gray-900 mb-2">주문 취소</h3>
+            <div className="text-sm text-gray-600 mb-3 space-y-1">
+              <p>주문번호: <span className="font-mono font-semibold">{cancelTarget.orderNumber}</span></p>
+              {cancelTarget.deliveryNumber && (
+                <p>배송번호: <span className="font-mono">{cancelTarget.deliveryNumber}</span></p>
+              )}
+              <p>포함 상품: <span className="font-semibold">{cancelTarget.items.length}건</span></p>
+            </div>
+            <div className="max-h-[150px] overflow-y-auto text-xs mb-4 bg-gray-50 rounded-lg p-2">
+              {cancelTarget.items.map(item => (
+                <div key={item.id} className="flex justify-between py-0.5">
+                  <span className="truncate max-w-[250px]">{item.sku_name}</span>
+                  <span className="text-gray-500">{item.quantity}개</span>
+                </div>
+              ))}
+            </div>
+            <p className="text-sm text-red-600 mb-4">이 주문의 모든 상품이 취소 처리됩니다.</p>
+            <div className="flex gap-2">
+              <button
+                onClick={handleCancel}
+                disabled={cancelling}
+                className="flex-1 py-2.5 bg-red-600 text-white rounded-xl text-sm font-semibold hover:bg-red-700 disabled:bg-gray-300"
+              >
+                {cancelling ? '처리 중...' : '주문 취소'}
+              </button>
+              <button
+                onClick={() => setCancelTarget(null)}
+                className="flex-1 py-2.5 bg-gray-100 text-gray-700 rounded-xl text-sm hover:bg-gray-200"
+              >
+                닫기
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
