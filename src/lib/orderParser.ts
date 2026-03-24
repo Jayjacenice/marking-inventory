@@ -9,6 +9,7 @@ export interface ParsedOrder {
   optionText: string;
   quantity: number;
   needsMarking: boolean;
+  needsOfflineShipment: boolean; // 오프라인 매장 출고 대상 (유니폼/마킹키트만)
   markingType: 'completed' | 'kit' | 'none'; // 완제품마킹 / 마킹키트 / 마킹없음
 }
 
@@ -19,6 +20,7 @@ export interface OrderParseResult {
     markingCompleted: number;  // 마킹 완제품 (26UN-*_선수)
     markingKit: number;        // 마킹키트 (26MK-*)
     noMarking: number;         // 마킹 불필요
+    offlineShipment: number;   // 오프라인 출고 대상 (유니폼 관련만)
     uniqueOrders: number;      // 고유 주문번호 수
   };
 }
@@ -89,6 +91,8 @@ export function parseOrderExcel(wb: XLSX.WorkBook): OrderParseResult {
 
     const option = String(row[colIdx.option] || '').trim();
     const { needsMarking, markingType } = classifyMarking(skuId, option);
+    // 오프라인 출고 대상: 유니폼(26UN-*) 또는 마킹키트(26MK-*)만
+    const needsOfflineShipment = skuId.startsWith('26UN-') || skuId.startsWith('26MK-');
 
     orders.push({
       orderNumber,
@@ -99,6 +103,7 @@ export function parseOrderExcel(wb: XLSX.WorkBook): OrderParseResult {
       optionText: option,
       quantity,
       needsMarking,
+      needsOfflineShipment,
       markingType,
     });
 
@@ -115,6 +120,7 @@ export function parseOrderExcel(wb: XLSX.WorkBook): OrderParseResult {
       markingCompleted,
       markingKit,
       noMarking,
+      offlineShipment: orders.filter(o => o.needsOfflineShipment).length,
       uniqueOrders: orderNumbers.size,
     },
   };

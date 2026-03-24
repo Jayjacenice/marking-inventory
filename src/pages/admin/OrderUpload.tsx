@@ -115,11 +115,13 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
     }
   };
 
-  // ── 재고 부족 체크 ──
+  // ── 재고 부족 체크 (오프라인 출고 대상만) ──
   const checkInventoryShortage = async (items: ParsedOrder[]) => {
+    // 오프라인 출고 대상(유니폼/마킹키트)만 필터
+    const offlineItems = items.filter(i => i.needsOfflineShipment);
     // SKU별 주문 수량 합산
     const demandMap: Record<string, { skuName: string; qty: number }> = {};
-    for (const item of items) {
+    for (const item of offlineItems) {
       if (!demandMap[item.skuId]) demandMap[item.skuId] = { skuName: item.skuName, qty: 0 };
       demandMap[item.skuId].qty += item.quantity;
     }
@@ -313,8 +315,8 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
               <p className="text-lg font-bold text-purple-700">{newOrders.filter(o => o.needsMarking).length}</p>
             </div>
             <div className="bg-green-50 rounded-lg p-3 text-center">
-              <p className="text-xs text-green-600">단순 출고</p>
-              <p className="text-lg font-bold text-green-700">{newOrders.filter(o => !o.needsMarking).length}</p>
+              <p className="text-xs text-green-600">오프라인 출고</p>
+              <p className="text-lg font-bold text-green-700">{newOrders.filter(o => o.needsOfflineShipment).length}</p>
             </div>
           </div>
 
