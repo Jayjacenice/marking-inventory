@@ -851,7 +851,7 @@ export default function StockLedger() {
                           {isMixed && <td className="px-2 py-1 font-medium">{item.type}</td>}
                           <td className="px-2 py-1">{item.date}</td>
                           <td className="px-2 py-1 font-mono">{item.skuId}</td>
-                          <td className="px-2 py-1 truncate max-w-[200px]">{item.skuName}</td>
+                          <td className="px-2 py-1 max-w-[400px]">{item.skuName}</td>
                           <td className="px-2 py-1 text-right font-semibold">{item.quantity.toLocaleString()}</td>
                         </tr>
                       ))}
@@ -1062,7 +1062,7 @@ export default function StockLedger() {
                       <td className="px-3 py-2 whitespace-nowrap text-xs">{r.warehouseName}</td>
                       <td className="px-3 py-2 whitespace-nowrap text-xs font-mono">{r.skuId}</td>
                       <td className="px-3 py-2 whitespace-nowrap text-xs font-mono text-gray-500">{r.barcode}</td>
-                      <td className="px-3 py-2 text-xs truncate max-w-[200px]">{r.skuName}</td>
+                      <td className="px-3 py-2 text-xs max-w-[400px]">{r.skuName}</td>
                       <td className="px-3 py-2 text-right text-xs tabular-nums">{r.opening.toLocaleString()}</td>
                       <td className="px-3 py-2 text-right text-xs tabular-nums text-blue-600 font-medium">
                         {r.inQty > 0 ? r.inQty.toLocaleString() : '-'}

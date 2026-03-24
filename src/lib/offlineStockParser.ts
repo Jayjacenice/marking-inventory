@@ -91,8 +91,33 @@ function parseReceiptSheet(ws: XLSX.WorkSheet): OfflineStockTransaction[] {
 }
 
 /**
- * 오프라인 매장 판매/입고 엑셀 파싱
- * 워크북에 '판매' 또는 '입고' 시트가 있으면 해당 시트 파싱
+ * 이동출고 탭 파싱
+ * 컬럼: A=날짜, B=품목코드, C=바코드, D=품목명, E=수량
+ */
+function parseMoveSheet(ws: XLSX.WorkSheet): OfflineStockTransaction[] {
+  const raw: any[][] = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
+  const txns: OfflineStockTransaction[] = [];
+
+  for (let i = 1; i < raw.length; i++) {
+    const row = raw[i];
+    const date = serialToDate(row[0]);
+    const barcode = String(row[2] || '').trim();
+    const skuName = String(row[3] || '').trim();
+    const qty = Number(row[4]) || 0;
+
+    if (!date || !barcode || barcode.length < 5 || qty <= 0) continue;
+
+    txns.push({
+      barcode, skuName, date, quantity: qty,
+      txType: '출고', memo: '이동출고 (플레이위즈)',
+    });
+  }
+  return txns;
+}
+
+/**
+ * 오프라인 매장 판매/입고/이동출고 엑셀 파싱
+ * 워크북에 '판매', '입고', '이동출고' 시트가 있으면 해당 시트 파싱
  * 없으면 첫 번째 시트를 자동 감지 (헤더로 판별)
  */
 export function parseOfflineStockExcel(wb: XLSX.WorkBook): OfflineStockParseResult {
@@ -101,6 +126,7 @@ export function parseOfflineStockExcel(wb: XLSX.WorkBook): OfflineStockParseResu
   // 시트명으로 직접 찾기
   const salesSheet = wb.Sheets['판매'];
   const receiptSheet = wb.Sheets['입고'];
+  const moveSheet = wb.Sheets['이동출고'];
 
   if (salesSheet) {
     allTxns.push(...parseSalesSheet(salesSheet));
@@ -108,9 +134,12 @@ export function parseOfflineStockExcel(wb: XLSX.WorkBook): OfflineStockParseResu
   if (receiptSheet) {
     allTxns.push(...parseReceiptSheet(receiptSheet));
   }
+  if (moveSheet) {
+    allTxns.push(...parseMoveSheet(moveSheet));
+  }
 
   // 명시적 시트가 없으면 첫 번째 시트의 헤더로 판별
-  if (!salesSheet && !receiptSheet) {
+  if (!salesSheet && !receiptSheet && !moveSheet) {
     const ws = wb.Sheets[wb.SheetNames[0]];
     const raw: any[][] = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
     if (raw.length < 2) throw new Error('데이터가 부족합니다.');
