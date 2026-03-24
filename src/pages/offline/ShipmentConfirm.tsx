@@ -176,11 +176,15 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
         const lineCount = lines.length;
         const detail: Record<string, number> = wo.sent_detail || {};
 
-        // 1. BOM 전개 후 총 주문량 계산
+        // 1. BOM 전개 후 총 주문량 계산 (구성품 기준)
         let totalOrdered = 0;
         for (const l of lines) {
           if (l.needs_marking && bomMap[l.finished_sku_id]) {
+            // BOM 등록됨 → 구성품 수 적용
             totalOrdered += (l.ordered_qty || 0) * bomMap[l.finished_sku_id];
+          } else if (l.needs_marking && l.finished_sku_id?.includes('_')) {
+            // BOM 미등록 마킹 완제품 → 유니폼+마킹키트 = 2배
+            totalOrdered += (l.ordered_qty || 0) * 2;
           } else {
             totalOrdered += (l.ordered_qty || 0);
           }
