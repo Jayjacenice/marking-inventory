@@ -5,7 +5,7 @@ export interface OfflineStockTransaction {
   skuName: string;
   date: string;       // YYYY-MM-DD
   quantity: number;
-  txType: '입고' | '판매' | '출고';  // DB tx_type에 맞춤
+  txType: '입고' | '판매' | '출고' | '반품';  // DB tx_type에 맞춤
   memo: string;
 }
 
@@ -56,11 +56,19 @@ function parseSalesSheet(ws: XLSX.WorkSheet): OfflineStockTransaction[] {
 
     if (!date || !barcode || barcode.length < 5 || qty === 0) continue;
 
-    txns.push({
-      barcode, skuName, date, quantity: qty,
-      txType: '판매',
-      memo: qty < 0 ? '매장 환불' : '매장 판매',
-    });
+    if (qty < 0) {
+      txns.push({
+        barcode, skuName, date, quantity: Math.abs(qty),
+        txType: '반품',
+        memo: '매장 환불',
+      });
+    } else {
+      txns.push({
+        barcode, skuName, date, quantity: qty,
+        txType: '판매',
+        memo: '매장 판매',
+      });
+    }
   }
   return txns;
 }
