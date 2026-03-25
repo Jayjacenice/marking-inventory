@@ -162,7 +162,7 @@ export default function ReceiptCheck({ currentUser }: { currentUser: AppUser }) 
       const waveNum = currentWave.summary?.wave ?? 1;
       setCurrentWaveNum(waveNum);
 
-      const waveItems: { skuId: string; skuName: string; sentQty: number }[] = currentWave.summary?.items || [];
+      const waveItems: { skuId: string; skuName: string; sentQty: number; needsMarking?: boolean }[] = currentWave.summary?.items || [];
 
       if (waveItems.length === 0) {
         setItems([]);
@@ -199,10 +199,13 @@ export default function ReceiptCheck({ currentUser }: { currentUser: AppUser }) 
       // waveItems가 곧 expectedQty (발송 시 이미 단품으로 전개됨)
       setItems(waveItems.map((item) => {
         const isMarking = item.skuId?.includes('MK') || item.skuName?.includes('마킹') || false;
-        // 구성품 SKU → 부모 완제품 SKU → needs_marking 판단
+        // 1순위: 발송 기록에 저장된 needsMarking (가장 정확)
+        // 2순위: BOM 역추적으로 부모 완제품의 needs_marking
+        // 3순위: isMarking 폴백
         const parentFinished = compToFinishedMap[item.skuId];
-        const needsMarking = needsMarkingMap[item.skuId]
+        const needsMarking = item.needsMarking
           ?? (parentFinished ? needsMarkingMap[parentFinished] : undefined)
+          ?? needsMarkingMap[item.skuId]
           ?? isMarking;
         return {
           skuId: item.skuId,

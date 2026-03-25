@@ -363,6 +363,8 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
               };
             }
             componentMap[key].needed += bom.quantity * (line.ordered_qty || 0);
+            // 동일 SKU가 비마킹 라인에서 먼저 등록된 경우 → 마킹으로 승격
+            componentMap[key].needsMarking = componentMap[key].needsMarking || true;
           }
         } else {
           // 비유니폼 단품 (악세서리 등)은 오프라인 발송 대상 아님 → skip
@@ -384,6 +386,7 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
               needsMarking: false,
             };
           }
+          // 이미 마킹 BOM에서 등록된 경우 needsMarking 유지 (OR 로직)
           componentMap[key].needed += (line.ordered_qty || 0);
         }
       }
@@ -743,6 +746,7 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
               };
             }
             mergedMap[item.skuId].orderedQty += item.orderedQty;
+            mergedMap[item.skuId].needsMarking = mergedMap[item.skuId].needsMarking || item.needsMarking;
             mergedMap[item.skuId].sources.push({
               woId: wo.id,
               woDate: wo.download_date,
@@ -1062,7 +1066,7 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
           const woDate = workOrders.find((w) => w.id === woId)?.download_date || '';
           const woSkuItems = Object.entries(woAllocation[woId] || {}).map(([skuId, qty]) => {
             const item = mergedItems.find((i) => i.skuId === skuId);
-            return { skuId, skuName: item?.skuName || skuId, sentQty: qty };
+            return { skuId, skuName: item?.skuName || skuId, sentQty: qty, needsMarking: item?.needsMarking ?? false };
           });
 
           await supabase.from('activity_log').insert({
@@ -1318,7 +1322,7 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
           action_date: new Date().toISOString().split('T')[0],
           summary: {
             wave: waveNum,
-            items: finalItems.filter((i) => i.sentQty > 0).map((i) => ({ skuId: i.skuId, skuName: i.skuName, sentQty: i.sentQty })),
+            items: finalItems.filter((i) => i.sentQty > 0).map((i) => ({ skuId: i.skuId, skuName: i.skuName, sentQty: i.sentQty, needsMarking: i.needsMarking ?? false })),
             totalQty: finalItems.reduce((s, i) => s + i.sentQty, 0),
             workOrderDate: selectedWo.download_date,
           },
