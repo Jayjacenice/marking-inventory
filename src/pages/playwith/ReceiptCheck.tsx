@@ -170,11 +170,12 @@ export default function ReceiptCheck({ currentUser }: { currentUser: AppUser }) 
         return;
       }
 
-      // barcode + needs_marking 조회
+      // barcode + needs_marking + BOM 역추적 조회
       const skuIds = waveItems.map((i) => i.skuId);
-      const [skuRes, wolRes] = await Promise.all([
+      const [skuRes, wolRes, bomRes] = await Promise.all([
         supabase.from('sku').select('sku_id, barcode').in('sku_id', skuIds),
         supabase.from('work_order_line').select('finished_sku_id, needs_marking').eq('work_order_id', wo.id),
+        supabase.from('bom').select('finished_sku_id, component_sku_id').in('component_sku_id', skuIds),
       ]);
       if (isStale()) return;
 
@@ -189,12 +190,20 @@ export default function ReceiptCheck({ currentUser }: { currentUser: AppUser }) 
         needsMarkingMap[l.finished_sku_id] = l.needs_marking;
       }
 
+      // BOM 역추적: component_sku_id → finished_sku_id (구성품→완제품)
+      const compToFinishedMap: Record<string, string> = {};
+      for (const b of (bomRes.data || []) as any[]) {
+        compToFinishedMap[b.component_sku_id] = b.finished_sku_id;
+      }
+
       // waveItems가 곧 expectedQty (발송 시 이미 단품으로 전개됨)
       setItems(waveItems.map((item) => {
         const isMarking = item.skuId?.includes('MK') || item.skuName?.includes('마킹') || false;
-        // needsMarking: work_order_line에서 해당 SKU가 마킹 작업 예정인지
-        // 구성품(BOM전개된)은 부모 finished_sku에서 판단 필요 → 일단 해당 SKU가 line에 있으면 그 값, 없으면 isMarking 기준
-        const needsMarking = needsMarkingMap[item.skuId] ?? isMarking;
+        // 구성품 SKU → 부모 완제품 SKU → needs_marking 판단
+        const parentFinished = compToFinishedMap[item.skuId];
+        const needsMarking = needsMarkingMap[item.skuId]
+          ?? (parentFinished ? needsMarkingMap[parentFinished] : undefined)
+          ?? isMarking;
         return {
           skuId: item.skuId,
           skuName: item.skuName,
