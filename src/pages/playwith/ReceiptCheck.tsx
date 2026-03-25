@@ -483,7 +483,26 @@ export default function ReceiptCheck({ currentUser }: { currentUser: AppUser }) 
               consumeMap[b.component_sku_id] = Math.max(0, (consumeMap[b.component_sku_id] || 0) - thisWaveQty * (b.quantity || 1));
             }
           } else {
-            thisWaveQty = 0;
+            // BOM 미등록: 패턴 추정으로 구성품 매칭
+            const fsku = line.finished_sku_id as string;
+            const remaining = Math.max(0, (line.ordered_qty || 0) - (line.received_qty || 0));
+            if (fsku.includes('_')) {
+              // composite: 26UN-BS-AW-006_CHW → 유니폼=26UN-BS-AW-006
+              const base = fsku.split('_')[0];
+              const available = consumeMap[base] || 0;
+              thisWaveQty = Math.min(available, remaining);
+              consumeMap[base] = Math.max(0, (consumeMap[base] || 0) - thisWaveQty);
+              // 마킹 구성품도 차감
+              const mk = base.replace('26UN-', '26MK-');
+              consumeMap[mk] = Math.max(0, (consumeMap[mk] || 0) - thisWaveQty);
+            } else if (fsku.startsWith('26MK-')) {
+              // 마킹키트 단독 라인: finished_sku_id 자체가 구성품
+              const available = consumeMap[fsku] || 0;
+              thisWaveQty = Math.min(available, remaining);
+              consumeMap[fsku] = Math.max(0, available - thisWaveQty);
+            } else {
+              thisWaveQty = 0;
+            }
           }
         } else {
           thisWaveQty = consumeMap[line.finished_sku_id] ?? 0;
