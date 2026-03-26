@@ -189,8 +189,8 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
     setSelectedDate(today);
     setHistoryItems([]);
     try {
-      // 마킹 필요 라인만 조회 (단품 제외)
-      const { data: lines, error: linesErr } = await supabase
+      // 마킹 필요 라인만 조회 (마킹키트 단품 출고 제외)
+      const { data: rawLines, error: linesErr } = await supabase
         .from('work_order_line')
         .select('id, finished_sku_id, ordered_qty, received_qty, marked_qty, sent_qty, finished_sku:sku!work_order_line_finished_sku_id_fkey(sku_name, barcode)')
         .eq('work_order_id', wo.id)
@@ -198,7 +198,10 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
       if (linesErr) throw linesErr;
       if (isStale()) return;
 
-      const lineIds = ((lines || []) as any[]).map((l: any) => l.id);
+      // 26MK- 로 시작하는 마킹키트 단품은 마킹 작업 대상이 아님
+      const lines = (rawLines || []).filter((l: any) => !l.finished_sku_id.startsWith('26MK-'));
+
+      const lineIds = (lines as any[]).map((l: any) => l.id);
       setAllLineIds(lineIds);
 
       // BOM + daily_marking 병렬 조회 (둘 다 1단계 lines 결과에만 의존)
