@@ -176,7 +176,7 @@ export default function ShipmentOut({ currentUser }: { currentUser: AppUser }) {
             shipQty: 0,
             inventoryQty: key in inventoryMap ? inventoryMap[key] : null,
             isShortage: false,
-            needsMarking: line.needs_marking,
+            needsMarking: isMarkingKitDirect ? false : line.needs_marking,
           };
         }
         itemMap[key].availableQty += qty;
