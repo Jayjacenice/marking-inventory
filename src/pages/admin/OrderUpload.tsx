@@ -542,7 +542,7 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
   };
 
   return (
-    <div className="p-4 sm:p-6 max-w-6xl mx-auto">
+    <div className="p-4 sm:p-6 max-w-[1400px] mx-auto">
       {/* 헤더 */}
       <div className="flex items-center gap-3 mb-6">
         <ShoppingCart className="w-7 h-7 text-indigo-600" />
@@ -784,19 +784,19 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
 
         {/* 주문 테이블 */}
         <div className="overflow-x-auto">
-          <table className="w-full text-sm">
+          <table className="w-full text-xs">
             <thead>
               <tr className="bg-gray-50 border-b">
-                <th className="px-2 py-2 text-left">주문일시</th>
-                <th className="px-2 py-2 text-left">주문번호</th>
-                <th className="px-2 py-2 text-left">배송번호</th>
-                <th className="px-2 py-2 text-left">SKU</th>
-                <th className="px-2 py-2 text-left">상품명</th>
-                <th className="px-2 py-2 text-left">옵션</th>
-                <th className="px-2 py-2 text-right">수량</th>
-                <th className="px-2 py-2 text-center">마킹</th>
-                <th className="px-2 py-2 text-center">상태</th>
-                <th className="px-2 py-2 text-center w-[60px]">액션</th>
+                <th className="px-2 py-2 text-left whitespace-nowrap">주문일시</th>
+                <th className="px-2 py-2 text-left whitespace-nowrap">주문번호</th>
+                <th className="px-2 py-2 text-left whitespace-nowrap">배송번호</th>
+                <th className="px-2 py-2 text-left whitespace-nowrap">SKU</th>
+                <th className="px-2 py-2 text-left whitespace-nowrap">상품명</th>
+                <th className="px-2 py-2 text-left whitespace-nowrap">옵션</th>
+                <th className="px-2 py-2 text-right whitespace-nowrap">수량</th>
+                <th className="px-2 py-2 text-center whitespace-nowrap">마킹</th>
+                <th className="px-2 py-2 text-center whitespace-nowrap">상태</th>
+                <th className="px-2 py-2 text-center w-[50px]">액션</th>
               </tr>
             </thead>
             <tbody>
@@ -809,13 +809,13 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
               ) : (
                 filtered.slice(0, 200).map(o => (
                   <tr key={o.id} className="border-t border-gray-50 hover:bg-gray-50">
-                    <td className="px-2 py-1.5 text-xs text-gray-500 whitespace-nowrap">{o.order_date ? o.order_date.slice(0, 16).replace('T', ' ') : '-'}</td>
-                    <td className="px-2 py-1.5 font-mono text-xs text-gray-600">{o.order_number}</td>
-                    <td className="px-2 py-1.5 font-mono text-xs text-gray-400">{o.delivery_number}</td>
-                    <td className="px-2 py-1.5 font-mono text-xs text-gray-500">{o.sku_id}</td>
-                    <td className="px-2 py-1.5 text-gray-900 max-w-[200px] truncate">{o.sku_name}</td>
-                    <td className="px-2 py-1.5 text-xs text-gray-500">{o.option_text}</td>
-                    <td className="px-2 py-1.5 text-right">{o.quantity}</td>
+                    <td className="px-2 py-1.5 text-gray-500 whitespace-nowrap">{o.order_date ? o.order_date.slice(0, 16).replace('T', ' ') : '-'}</td>
+                    <td className="px-2 py-1.5 font-mono text-gray-600 whitespace-nowrap">{o.order_number}</td>
+                    <td className="px-2 py-1.5 font-mono text-gray-400 whitespace-nowrap">{o.delivery_number}</td>
+                    <td className="px-2 py-1.5 font-mono text-gray-500 whitespace-nowrap">{o.sku_id}</td>
+                    <td className="px-2 py-1.5 text-gray-900 whitespace-nowrap">{o.sku_name}</td>
+                    <td className="px-2 py-1.5 text-gray-500 whitespace-nowrap">{o.option_text}</td>
+                    <td className="px-2 py-1.5 text-right whitespace-nowrap">{o.quantity}</td>
                     <td className="px-2 py-1.5 text-center">
                       {o.needs_marking ? <span className="text-purple-600 font-semibold">O</span> : <span className="text-gray-300">-</span>}
                     </td>
