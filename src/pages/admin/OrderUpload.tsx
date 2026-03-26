@@ -36,8 +36,8 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
   const [statusFilter, setStatusFilter] = useState('전체');
   const [searchText, setSearchText] = useState('');
 
-  // 취소
-  const [cancelTarget, setCancelTarget] = useState<{ orderNumber: string; deliveryNumber: string | null; items: OnlineOrder[] } | null>(null);
+  // 취소 (개별 라인)
+  const [cancelTarget, setCancelTarget] = useState<{ item: OnlineOrder } | null>(null);
   const [cancelling, setCancelling] = useState(false);
 
   // 등록일 기준 삭제
@@ -259,31 +259,51 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
     XLSX.writeFile(wb, `BOM미등록_${new Date().toISOString().slice(0, 10)}.xlsx`);
   };
 
-  // ── 주문 취소 ──
-  const openCancelModal = (orderNumber: string) => {
-    const items = orders.filter(o => o.order_number === orderNumber);
-    if (items.length === 0) return;
-    setCancelTarget({ orderNumber, deliveryNumber: items[0].delivery_number, items });
+  // ── 주문 취소 (개별 라인) ──
+  const openCancelModal = (item: OnlineOrder) => {
+    setCancelTarget({ item });
   };
 
   const handleCancel = async () => {
     if (!cancelTarget) return;
     setCancelling(true);
+    const item = cancelTarget.item;
     try {
+      // 해당 라인 1건만 취소
       const { error } = await supabaseAdmin
         .from('online_order')
         .update({ status: '취소' })
-        .eq('order_number', cancelTarget.orderNumber);
+        .eq('id', item.id);
       if (error) throw error;
+
+      // 작업지시서에 연결된 경우 → work_order_line 수량 차감
+      if (item.work_order_id) {
+        const { data: wol } = await supabaseAdmin
+          .from('work_order_line')
+          .select('id, ordered_qty')
+          .eq('work_order_id', item.work_order_id)
+          .eq('finished_sku_id', item.sku_id)
+          .single();
+
+        if (wol) {
+          const newQty = Math.max(0, (wol.ordered_qty || 0) - item.quantity);
+          if (newQty === 0) {
+            // 수량 0이면 라인 삭제
+            await supabaseAdmin.from('work_order_line').delete().eq('id', wol.id);
+          } else {
+            await supabaseAdmin.from('work_order_line').update({ ordered_qty: newQty }).eq('id', wol.id);
+          }
+        }
+      }
 
       supabase.from('activity_log').insert({
         user_id: currentUserId,
         action_type: 'order_cancel',
         action_date: new Date().toISOString().split('T')[0],
-        summary: { order_number: cancelTarget.orderNumber, items: cancelTarget.items.length },
+        summary: { order_number: item.order_number, sku_id: item.sku_id, quantity: item.quantity },
       }).then(() => {});
 
-      setMessage({ type: 'success', text: `주문 ${cancelTarget.orderNumber} 취소 완료 (${cancelTarget.items.length}건)` });
+      setMessage({ type: 'success', text: `${item.sku_name} ${item.quantity}개 취소 완료` });
       setCancelTarget(null);
       loadDashboard();
     } catch (err: any) {
@@ -827,9 +847,9 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
                     <td className="px-2 py-1.5 text-center">
                       {o.status !== '취소' && o.status !== '출고완료' && (
                         <button
-                          onClick={() => openCancelModal(o.order_number)}
+                          onClick={() => openCancelModal(o)}
                           className="p-1 text-red-400 hover:bg-red-50 rounded"
-                          title="주문 취소"
+                          title="이 라인 취소"
                         >
                           <XCircle size={14} />
                         </button>
@@ -846,34 +866,28 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
         )}
       </div>
 
-      {/* 취소 확인 모달 */}
+      {/* 취소 확인 모달 (개별 라인) */}
       {cancelTarget && (
         <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50" onClick={() => setCancelTarget(null)}>
           <div className="bg-white rounded-2xl shadow-xl p-6 w-full max-w-md mx-4" onClick={(e) => e.stopPropagation()}>
-            <h3 className="text-lg font-bold text-gray-900 mb-2">주문 취소</h3>
+            <h3 className="text-lg font-bold text-gray-900 mb-2">주문 라인 취소</h3>
             <div className="text-sm text-gray-600 mb-3 space-y-1">
-              <p>주문번호: <span className="font-mono font-semibold">{cancelTarget.orderNumber}</span></p>
-              {cancelTarget.deliveryNumber && (
-                <p>배송번호: <span className="font-mono">{cancelTarget.deliveryNumber}</span></p>
+              <p>주문번호: <span className="font-mono font-semibold">{cancelTarget.item.order_number}</span></p>
+              <p>상품: <span className="font-semibold">{cancelTarget.item.sku_name}</span></p>
+              <p>SKU: <span className="font-mono text-xs">{cancelTarget.item.sku_id}</span></p>
+              <p>수량: <span className="font-semibold">{cancelTarget.item.quantity}개</span></p>
+              {cancelTarget.item.work_order_id && (
+                <p className="text-orange-600 text-xs mt-1">⚠ 작업지시서 연결됨 — 발송 수량도 함께 차감됩니다</p>
               )}
-              <p>포함 상품: <span className="font-semibold">{cancelTarget.items.length}건</span></p>
             </div>
-            <div className="max-h-[150px] overflow-y-auto text-xs mb-4 bg-gray-50 rounded-lg p-2">
-              {cancelTarget.items.map(item => (
-                <div key={item.id} className="flex justify-between py-0.5">
-                  <span className="truncate max-w-[250px]">{item.sku_name}</span>
-                  <span className="text-gray-500">{item.quantity}개</span>
-                </div>
-              ))}
-            </div>
-            <p className="text-sm text-red-600 mb-4">이 주문의 모든 상품이 취소 처리됩니다.</p>
+            <p className="text-sm text-red-600 mb-4">이 상품 라인만 취소됩니다. 같은 주문의 다른 상품은 영향 없습니다.</p>
             <div className="flex gap-2">
               <button
                 onClick={handleCancel}
                 disabled={cancelling}
                 className="flex-1 py-2.5 bg-red-600 text-white rounded-xl text-sm font-semibold hover:bg-red-700 disabled:bg-gray-300"
               >
-                {cancelling ? '처리 중...' : '주문 취소'}
+                {cancelling ? '처리 중...' : '이 라인 취소'}
               </button>
               <button
                 onClick={() => setCancelTarget(null)}
