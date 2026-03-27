@@ -166,9 +166,12 @@ export default function StockLedger() {
       }
 
       // key 생성 헬퍼: base_barcode가 있으면 합산, 없으면 sku_id 개별
+      // 단, 마킹 완성품(SKU에 _선수명 접미사)은 단품과 합산하면 안 되므로 개별 처리
       const makeKey = (whId: string, skuId: string) => {
         const info = skuLookup[skuId];
-        const groupId = info?.baseBarcode || skuId;
+        // 마킹 완성품: SKU에 _ 접미사가 있고 26UN- 또는 26MK-로 시작
+        const isMarkedProduct = skuId.includes('_') && (skuId.startsWith('26UN-') || skuId.startsWith('26MK-'));
+        const groupId = isMarkedProduct ? skuId : (info?.baseBarcode || skuId);
         return `${whId}|${groupId}`;
       };
 
