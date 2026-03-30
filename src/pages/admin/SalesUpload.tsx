@@ -6,7 +6,6 @@ import type { TxType } from '../../types';
 import * as XLSX from 'xlsx';
 import {
   ArrowDownCircle,
-  ArrowUpCircle,
   ShoppingCart,
   Truck,
   AlertTriangle,
