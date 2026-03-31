@@ -5,7 +5,7 @@ import { useStaleGuard } from '../../hooks/useStaleGuard';
 import * as XLSX from 'xlsx';
 import {
   Database, Search, Download, Upload, Pencil, Trash2, Check, X,
-  AlertTriangle, CheckCircle,
+  AlertTriangle, CheckCircle, Plus,
 } from 'lucide-react';
 
 interface SKU {
@@ -35,6 +35,14 @@ export default function SKUMaster({ currentUserId }: { currentUserId: string }) 
 
   // 삭제
   const [deleteTarget, setDeleteTarget] = useState<SKU | null>(null);
+
+  // 수기 등록
+  const [showAddForm, setShowAddForm] = useState(false);
+  const [newSkuId, setNewSkuId] = useState('');
+  const [newSkuName, setNewSkuName] = useState('');
+  const [newBarcode, setNewBarcode] = useState('');
+  const [newType, setNewType] = useState<string>('완제품');
+  const [addSaving, setAddSaving] = useState(false);
 
   // 엑셀 업로드 (수정 + 신규등록)
   const [uploadPreview, setUploadPreview] = useState<{
@@ -109,6 +117,48 @@ export default function SKUMaster({ currentUserId }: { currentUserId: string }) 
 
   const cancelEdit = () => {
     setEditingId(null);
+  };
+
+  const handleAddManual = async () => {
+    const skuId = newSkuId.trim();
+    const skuName = newSkuName.trim();
+    if (!skuId || !skuName) {
+      setMessage({ type: 'error', text: 'SKU코드와 상품명은 필수입니다.' });
+      return;
+    }
+    if (skus.some((s) => s.sku_id === skuId)) {
+      setMessage({ type: 'error', text: `이미 존재하는 SKU코드입니다: ${skuId}` });
+      return;
+    }
+    setAddSaving(true);
+    try {
+      const { error } = await supabaseAdmin.from('sku').insert({
+        sku_id: skuId,
+        sku_name: skuName,
+        barcode: newBarcode.trim() || null,
+        type: newType,
+      });
+      if (error) throw error;
+
+      supabase.from('activity_log').insert({
+        user_id: currentUserId,
+        action_type: 'sku_edit',
+        action_date: new Date().toISOString().split('T')[0],
+        summary: { sku_id: skuId, action: 'manual_add', sku_name: skuName },
+      }).then(() => {});
+
+      setMessage({ type: 'success', text: `${skuId} 등록 완료` });
+      setNewSkuId('');
+      setNewSkuName('');
+      setNewBarcode('');
+      setNewType('완제품');
+      setShowAddForm(false);
+      loadSkus();
+    } catch (err: any) {
+      setMessage({ type: 'error', text: `등록 실패: ${err.message}` });
+    } finally {
+      setAddSaving(false);
+    }
   };
 
   const saveEdit = async () => {
@@ -415,6 +465,16 @@ export default function SKUMaster({ currentUserId }: { currentUserId: string }) 
           <Download size={14} /> 엑셀 다운로드
         </button>
         <button
+          onClick={() => setShowAddForm(!showAddForm)}
+          className={`flex items-center gap-1.5 px-4 py-2.5 rounded-xl text-sm ${
+            showAddForm
+              ? 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+              : 'bg-blue-600 text-white hover:bg-blue-700'
+          }`}
+        >
+          <Plus size={14} /> 수기 등록
+        </button>
+        <button
           onClick={() => fileInputRef.current?.click()}
           className="flex items-center gap-1.5 px-4 py-2.5 bg-indigo-600 text-white rounded-xl text-sm hover:bg-indigo-700"
         >
@@ -422,6 +482,67 @@ export default function SKUMaster({ currentUserId }: { currentUserId: string }) 
         </button>
         <input ref={fileInputRef} type="file" accept=".xlsx,.xls" onChange={handleUpload} className="hidden" />
       </div>
+
+      {/* 수기 등록 폼 */}
+      {showAddForm && (
+        <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 mb-4">
+          <h3 className="font-semibold text-blue-800 mb-3">새 품목 수기 등록</h3>
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">SKU코드 *</label>
+              <input
+                value={newSkuId}
+                onChange={(e) => setNewSkuId(e.target.value)}
+                placeholder="예: KE-UNI-001"
+                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-400 focus:outline-none"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">상품명 *</label>
+              <input
+                value={newSkuName}
+                onChange={(e) => setNewSkuName(e.target.value)}
+                placeholder="상품명을 입력하세요"
+                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-400 focus:outline-none"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">바코드</label>
+              <input
+                value={newBarcode}
+                onChange={(e) => setNewBarcode(e.target.value)}
+                placeholder="선택사항"
+                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-400 focus:outline-none"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">타입</label>
+              <select
+                value={newType}
+                onChange={(e) => setNewType(e.target.value)}
+                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm bg-white focus:ring-2 focus:ring-blue-400 focus:outline-none"
+              >
+                {SKU_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
+              </select>
+            </div>
+          </div>
+          <div className="flex gap-2 mt-3">
+            <button
+              onClick={handleAddManual}
+              disabled={addSaving}
+              className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50"
+            >
+              {addSaving ? '등록 중...' : '등록'}
+            </button>
+            <button
+              onClick={() => { setShowAddForm(false); setNewSkuId(''); setNewSkuName(''); setNewBarcode(''); setNewType('완제품'); }}
+              className="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg text-sm hover:bg-gray-300"
+            >
+              취소
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* 엑셀 업로드 미리보기 */}
       {uploadPreview && (

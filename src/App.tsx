@@ -96,6 +96,15 @@ function AppContent() {
      */
     let resolved = false;
 
+    // 0) 절대 안전장치 — 어떤 이유로든 5초 내 loading이 해제되지 않으면 강제 해제
+    //    (시크릿 모드 등에서 Supabase 초기화가 hang되는 경우 대비)
+    const failsafeTimer = setTimeout(() => {
+      if (!resolved) {
+        resolved = true;
+        setLoading(false);
+      }
+    }, 5_000);
+
     // 1) 직접 getSession — 3초 내 응답 없으면 세션 없음으로 처리
     const initSession = async () => {
       try {
@@ -145,6 +154,7 @@ function AppContent() {
     });
 
     return () => {
+      clearTimeout(failsafeTimer);
       subscription.unsubscribe();
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps

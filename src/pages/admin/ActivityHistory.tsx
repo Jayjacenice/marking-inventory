@@ -110,8 +110,12 @@ export default function ActivityHistory() {
   }, [selectedDate, actionFilter, userFilter]);
 
   const loadUsers = async () => {
-    const { data } = await supabaseAdmin.from('user_profile').select('id, name, role');
-    if (!isStale() && data) setUsers(data as any[]);
+    try {
+      const { data } = await supabaseAdmin.from('user_profile').select('id, name, role');
+      if (!isStale() && data) setUsers(data as any[]);
+    } catch (err) {
+      console.error('loadUsers error:', err);
+    }
   };
 
   const loadLogs = async () => {

@@ -82,21 +82,25 @@ export default function StockLedger() {
   const fetchCjStatus = useCallback(async () => {
     const cjWh = warehouses.find((w) => w.name.includes('CJ') || w.name.includes('cj'));
     if (!cjWh) return;
-    const { data } = await supabase
-      .from('inventory_transaction')
-      .select('tx_type, tx_date')
-      .eq('source', 'cj_excel')
-      .eq('warehouse_id', cjWh.id);
-    if (!data) return;
-    const status: Record<string, { maxDate: string; minDate: string; count: number }> = {};
-    for (const row of data) {
-      const type = row.tx_type as string;
-      if (!status[type]) status[type] = { maxDate: '', minDate: '9999-99-99', count: 0 };
-      status[type].count++;
-      if (row.tx_date > status[type].maxDate) status[type].maxDate = row.tx_date;
-      if (row.tx_date < status[type].minDate) status[type].minDate = row.tx_date;
+    try {
+      const { data } = await supabase
+        .from('inventory_transaction')
+        .select('tx_type, tx_date')
+        .eq('source', 'cj_excel')
+        .eq('warehouse_id', cjWh.id);
+      if (!data) return;
+      const status: Record<string, { maxDate: string; minDate: string; count: number }> = {};
+      for (const row of data) {
+        const type = row.tx_type as string;
+        if (!status[type]) status[type] = { maxDate: '', minDate: '9999-99-99', count: 0 };
+        status[type].count++;
+        if (row.tx_date > status[type].maxDate) status[type].maxDate = row.tx_date;
+        if (row.tx_date < status[type].minDate) status[type].minDate = row.tx_date;
+      }
+      setCjStatus(status);
+    } catch (err) {
+      console.error('fetchCjStatus error:', err);
     }
-    setCjStatus(status);
   }, [warehouses]);
 
   useEffect(() => {

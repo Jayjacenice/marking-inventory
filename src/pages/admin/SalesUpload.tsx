@@ -80,28 +80,32 @@ export default function SalesUpload() {
   // 등록 현황 조회
   const fetchTxStatus = useCallback(async () => {
     if (!offlineWarehouse) return;
-    const { data } = await supabase
-      .from('inventory_transaction')
-      .select('tx_date, tx_type, quantity')
-      .eq('warehouse_id', offlineWarehouse.id)
-      .eq('source', 'offline_manual')
-      .order('tx_date', { ascending: false })
-      .limit(1000);
-    if (!data || isStale()) return;
+    try {
+      const { data } = await supabase
+        .from('inventory_transaction')
+        .select('tx_date, tx_type, quantity')
+        .eq('warehouse_id', offlineWarehouse.id)
+        .eq('source', 'offline_manual')
+        .order('tx_date', { ascending: false })
+        .limit(1000);
+      if (!data || isStale()) return;
 
-    const map: Record<string, { count: number; totalQty: number }> = {};
-    for (const row of data) {
-      const displayType = row.tx_type === '출고' ? '이동출고' : row.tx_type;
-      const key = `${row.tx_date}|${displayType}`;
-      if (!map[key]) map[key] = { count: 0, totalQty: 0 };
-      map[key].count += 1;
-      map[key].totalQty += row.quantity || 0;
+      const map: Record<string, { count: number; totalQty: number }> = {};
+      for (const row of data) {
+        const displayType = row.tx_type === '출고' ? '이동출고' : row.tx_type;
+        const key = `${row.tx_date}|${displayType}`;
+        if (!map[key]) map[key] = { count: 0, totalQty: 0 };
+        map[key].count += 1;
+        map[key].totalQty += row.quantity || 0;
+      }
+      const result = Object.entries(map).map(([k, v]) => {
+        const [date, txType] = k.split('|');
+        return { date, txType, ...v };
+      }).sort((a, b) => b.date.localeCompare(a.date) || a.txType.localeCompare(b.txType));
+      setTxStatus(result);
+    } catch (err) {
+      console.error('fetchTxStatus error:', err);
     }
-    const result = Object.entries(map).map(([k, v]) => {
-      const [date, txType] = k.split('|');
-      return { date, txType, ...v };
-    }).sort((a, b) => b.date.localeCompare(a.date) || a.txType.localeCompare(b.txType));
-    setTxStatus(result);
   }, [offlineWarehouse, isStale]);
 
   useEffect(() => { if (offlineWarehouse) fetchTxStatus(); }, [offlineWarehouse, fetchTxStatus]);
@@ -277,6 +281,7 @@ export default function SalesUpload() {
         const barcodes = [...new Set(rows.map((r) => r.barcode))];
         const barcodeToSku: Record<string, { skuId: string; skuName: string }> = {};
 
+        // 1차: barcode 필드로 매칭
         for (let i = 0; i < barcodes.length; i += 500) {
           const batch = barcodes.slice(i, i + 500);
           const { data: skus } = await supabase
@@ -286,6 +291,23 @@ export default function SalesUpload() {
           if (skus) {
             for (const s of skus) {
               if (s.barcode) barcodeToSku[s.barcode] = { skuId: s.sku_id, skuName: s.sku_name || s.sku_id };
+            }
+          }
+        }
+
+        // 2차: barcode 미매칭분은 sku_id로 재시도
+        const unmatchedCodes = barcodes.filter((b) => !barcodeToSku[b]);
+        if (unmatchedCodes.length > 0) {
+          for (let i = 0; i < unmatchedCodes.length; i += 500) {
+            const batch = unmatchedCodes.slice(i, i + 500);
+            const { data: skus } = await supabase
+              .from('sku')
+              .select('sku_id, sku_name')
+              .in('sku_id', batch);
+            if (skus) {
+              for (const s of skus) {
+                barcodeToSku[s.sku_id] = { skuId: s.sku_id, skuName: s.sku_name || s.sku_id };
+              }
             }
           }
         }
