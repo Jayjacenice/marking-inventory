@@ -29,6 +29,16 @@ interface ParsedRow {
   skuId: string | null;
   skuName: string | null;
   matched: boolean;
+  txType?: TxType;    // 매장판매일보: 반품 행은 '반품'
+  saleDate?: string;  // 매장판매일보: 행별 날짜
+  saleType?: string;  // 매장판매일보: "판매"/"반품" (표시용)
+  brand?: string;     // 매장판매일보: 브랜드명 (표시용)
+}
+
+/** Excel serial date → YYYY-MM-DD */
+function excelDateToStr(serial: number): string {
+  const d = new Date((serial - 25569) * 86400000);
+  return d.toISOString().slice(0, 10);
 }
 
 export default function SalesUpload() {
@@ -96,7 +106,11 @@ export default function SalesUpload() {
 
   useEffect(() => { if (offlineWarehouse) fetchTxStatus(); }, [offlineWarehouse, fetchTxStatus]);
 
-  // 엑셀 파싱 (3컬럼: 구분자, 바코드, 수량 또는 2컬럼: 바코드, 수량)
+  // 매장판매일보 감지 상태
+  const [isPosDaily, setIsPosDaily] = useState(false);
+  const [posDailyStats, setPosDailyStats] = useState<{ total: number; filtered: number; saleCount: number; returnCount: number } | null>(null);
+
+  // 엑셀 파싱 — 자동 감지: 매장판매일보(18컬럼) vs 기존(2/3컬럼)
   const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -105,6 +119,8 @@ export default function SalesUpload() {
     setParsing(true);
     setUploadResult(null);
     setParsedRows([]);
+    setIsPosDaily(false);
+    setPosDailyStats(null);
 
     try {
       const buf = await file.arrayBuffer();
@@ -112,66 +128,181 @@ export default function SalesUpload() {
       const ws = wb.Sheets[wb.SheetNames[0]];
       const raw: any[][] = XLSX.utils.sheet_to_json(ws, { header: 1 });
 
-      // 헤더 스킵 (첫 행이 텍스트면 헤더)
-      const startIdx = raw.length > 0 && typeof raw[0][0] === 'string' && isNaN(Number(raw[0][0])) ? 1 : 0;
+      // 포맷 자동 감지: 첫 행이 10컬럼 이상이면 매장판매일보
+      const isDaily = raw.length > 0 && raw[0]?.length >= 10;
 
-      const rows: { barcode: string; quantity: number }[] = [];
-      for (let i = startIdx; i < raw.length; i++) {
-        const r = raw[i];
-        if (!r || r.length === 0) continue;
+      if (isDaily) {
+        // ─── 매장판매일보 파싱 ───
+        setIsPosDaily(true);
+        const startIdx = typeof raw[0][0] === 'string' && isNaN(Number(raw[0][0])) ? 1 : 0;
 
-        let barcode: string;
-        let qty: number;
-
-        if (r.length >= 3 && typeof r[0] === 'string' && isNaN(Number(r[0]))) {
-          // 3컬럼: 구분자, 바코드, 수량
-          barcode = String(r[1] || '').trim();
-          qty = Number(r[2]) || 0;
-        } else {
-          // 2컬럼: 바코드, 수량
-          barcode = String(r[0] || '').trim();
-          qty = Number(r[1]) || 0;
+        interface DailyRow {
+          skuCode: string;   // 추가바코드2 (sku_id)
+          barcode: string;   // 추가바코드1 (barcode)
+          quantity: number;
+          txType: TxType;
+          saleDate: string;
+          saleType: string;  // 판매/반품
+          brand: string;
         }
 
-        if (!barcode || qty <= 0) continue;
-        rows.push({ barcode, quantity: qty });
-      }
+        const dailyRows: DailyRow[] = [];
+        let totalDataRows = 0;
 
-      if (rows.length === 0) {
-        setUploadResult('파싱 가능한 데이터가 없습니다. 엑셀에 바코드, 수량 컬럼이 있는지 확인하세요.');
-        setParsing(false);
-        return;
-      }
+        for (let i = startIdx; i < raw.length; i++) {
+          const r = raw[i];
+          if (!r || !r[3]) continue; // 브랜드 없으면 skip (합계행 등)
+          totalDataRows++;
 
-      // 바코드 → SKU 매칭
-      const barcodes = [...new Set(rows.map((r) => r.barcode))];
-      const barcodeToSku: Record<string, { skuId: string; skuName: string }> = {};
+          const brand = String(r[3] || '');
+          if (!brand.includes('카카오엔터')) continue;
 
-      for (let i = 0; i < barcodes.length; i += 500) {
-        const batch = barcodes.slice(i, i + 500);
-        const { data: skus } = await supabase
-          .from('sku')
-          .select('sku_id, sku_name, barcode')
-          .in('barcode', batch);
-        if (skus) {
-          for (const s of skus) {
-            if (s.barcode) barcodeToSku[s.barcode] = { skuId: s.sku_id, skuName: s.sku_name || s.sku_id };
+          const qty = Number(r[13]) || 0;
+          if (qty === 0) continue;
+
+          const saleType = String(r[12] || '').trim();
+          const isReturn = saleType === '반품' || qty < 0;
+
+          // 날짜 파싱
+          let saleDate = txDate;
+          const rawDate = r[1];
+          if (typeof rawDate === 'number' && rawDate > 40000) {
+            saleDate = excelDateToStr(rawDate);
+          } else if (typeof rawDate === 'string' && rawDate.includes('-')) {
+            saleDate = rawDate.slice(0, 10);
+          }
+
+          dailyRows.push({
+            skuCode: String(r[11] || '').trim(),
+            barcode: String(r[10] || '').trim(),
+            quantity: Math.abs(qty),
+            txType: isReturn ? '반품' : '판매',
+            saleDate,
+            saleType: isReturn ? '반품' : '판매',
+            brand,
+          });
+        }
+
+        if (dailyRows.length === 0) {
+          setPosDailyStats({ total: totalDataRows, filtered: 0, saleCount: 0, returnCount: 0 });
+          setUploadResult(`전체 ${totalDataRows}행 중 카카오엔터 브랜드 데이터가 없습니다.`);
+          setParsing(false);
+          return;
+        }
+
+        const saleCount = dailyRows.filter((r) => r.saleType === '판매').length;
+        const returnCount = dailyRows.filter((r) => r.saleType === '반품').length;
+        setPosDailyStats({ total: totalDataRows, filtered: dailyRows.length, saleCount, returnCount });
+
+        // 2패스 SKU 매칭: 1차 sku_id, 2차 barcode
+        const skuCodes = [...new Set(dailyRows.map((r) => r.skuCode).filter(Boolean))];
+        const skuCodeMap: Record<string, { skuId: string; skuName: string }> = {};
+
+        for (let i = 0; i < skuCodes.length; i += 500) {
+          const batch = skuCodes.slice(i, i + 500);
+          const { data: skus } = await supabase
+            .from('sku')
+            .select('sku_id, sku_name')
+            .in('sku_id', batch);
+          if (skus) {
+            for (const s of skus) skuCodeMap[s.sku_id] = { skuId: s.sku_id, skuName: s.sku_name || s.sku_id };
           }
         }
+
+        // 2차: sku_id 미매칭 행의 barcode로 재시도
+        const unmatchedBarcodes = [...new Set(
+          dailyRows.filter((r) => !skuCodeMap[r.skuCode] && r.barcode).map((r) => r.barcode)
+        )];
+        const barcodeMap: Record<string, { skuId: string; skuName: string }> = {};
+
+        for (let i = 0; i < unmatchedBarcodes.length; i += 500) {
+          const batch = unmatchedBarcodes.slice(i, i + 500);
+          const { data: skus } = await supabase
+            .from('sku')
+            .select('sku_id, sku_name, barcode')
+            .in('barcode', batch);
+          if (skus) {
+            for (const s of skus) {
+              if (s.barcode) barcodeMap[s.barcode] = { skuId: s.sku_id, skuName: s.sku_name || s.sku_id };
+            }
+          }
+        }
+
+        const parsed: ParsedRow[] = dailyRows.map((r) => {
+          const match = skuCodeMap[r.skuCode] || barcodeMap[r.barcode];
+          return {
+            barcode: r.skuCode || r.barcode,
+            quantity: r.quantity,
+            skuId: match?.skuId || null,
+            skuName: match?.skuName || null,
+            matched: !!match,
+            txType: r.txType,
+            saleDate: r.saleDate,
+            saleType: r.saleType,
+            brand: r.brand,
+          };
+        });
+
+        if (!isStale()) setParsedRows(parsed);
+      } else {
+        // ─── 기존 2/3컬럼 파싱 ───
+        const startIdx = raw.length > 0 && typeof raw[0][0] === 'string' && isNaN(Number(raw[0][0])) ? 1 : 0;
+
+        const rows: { barcode: string; quantity: number }[] = [];
+        for (let i = startIdx; i < raw.length; i++) {
+          const r = raw[i];
+          if (!r || r.length === 0) continue;
+
+          let barcode: string;
+          let qty: number;
+
+          if (r.length >= 3 && typeof r[0] === 'string' && isNaN(Number(r[0]))) {
+            barcode = String(r[1] || '').trim();
+            qty = Number(r[2]) || 0;
+          } else {
+            barcode = String(r[0] || '').trim();
+            qty = Number(r[1]) || 0;
+          }
+
+          if (!barcode || qty <= 0) continue;
+          rows.push({ barcode, quantity: qty });
+        }
+
+        if (rows.length === 0) {
+          setUploadResult('파싱 가능한 데이터가 없습니다. 엑셀에 바코드, 수량 컬럼이 있는지 확인하세요.');
+          setParsing(false);
+          return;
+        }
+
+        const barcodes = [...new Set(rows.map((r) => r.barcode))];
+        const barcodeToSku: Record<string, { skuId: string; skuName: string }> = {};
+
+        for (let i = 0; i < barcodes.length; i += 500) {
+          const batch = barcodes.slice(i, i + 500);
+          const { data: skus } = await supabase
+            .from('sku')
+            .select('sku_id, sku_name, barcode')
+            .in('barcode', batch);
+          if (skus) {
+            for (const s of skus) {
+              if (s.barcode) barcodeToSku[s.barcode] = { skuId: s.sku_id, skuName: s.sku_name || s.sku_id };
+            }
+          }
+        }
+
+        const parsed: ParsedRow[] = rows.map((r) => {
+          const match = barcodeToSku[r.barcode];
+          return {
+            barcode: r.barcode,
+            quantity: r.quantity,
+            skuId: match?.skuId || null,
+            skuName: match?.skuName || null,
+            matched: !!match,
+          };
+        });
+
+        if (!isStale()) setParsedRows(parsed);
       }
-
-      const parsed: ParsedRow[] = rows.map((r) => {
-        const match = barcodeToSku[r.barcode];
-        return {
-          barcode: r.barcode,
-          quantity: r.quantity,
-          skuId: match?.skuId || null,
-          skuName: match?.skuName || null,
-          matched: !!match,
-        };
-      });
-
-      if (!isStale()) setParsedRows(parsed);
     } catch (err: any) {
       setUploadResult(`파싱 실패: ${err.message}`);
     } finally {
@@ -192,11 +323,11 @@ export default function SalesUpload() {
       const txRows = matched.map((r) => ({
         warehouseId: offlineWarehouse.id,
         skuId: r.skuId!,
-        txType: activeTab,
+        txType: r.txType || activeTab,
         quantity: r.quantity,
         source: 'offline_manual' as const,
-        txDate: txDate,
-        memo: `매장입출고:${txDate}:${activeTabInfo.label}`,
+        txDate: r.saleDate || txDate,
+        memo: `매장입출고:${r.saleDate || txDate}:${r.saleType || activeTabInfo.label}`,
       }));
 
       const skuNameMap = new Map<string, string>();
@@ -304,7 +435,9 @@ export default function SalesUpload() {
           <div>
             <h3 className={`text-sm font-semibold text-${tabColor}-700`}>{activeTabInfo.desc}</h3>
             <p className="text-xs text-gray-500 mt-1">
-              엑셀 양식: 바코드, 수량 (2컬럼) 또는 구분자, 바코드, 수량 (3컬럼)
+              {activeTab === '판매' || activeTab === '출고'
+                ? '엑셀 양식: 바코드+수량 (2/3컬럼) 또는 매장판매일보 (자동 감지)'
+                : '엑셀 양식: 바코드, 수량 (2컬럼) 또는 구분자, 바코드, 수량 (3컬럼)'}
             </p>
           </div>
           <div className="flex items-center gap-2">
@@ -337,7 +470,16 @@ export default function SalesUpload() {
       {/* 파싱 결과 */}
       {parsedRows.length > 0 && (
         <div className={`bg-${tabColor}-50 border border-${tabColor}-200 rounded-xl p-4 mb-4`}>
-          <div className="grid grid-cols-3 gap-3 mb-4">
+          {/* 매장판매일보 필터 안내 */}
+          {isPosDaily && posDailyStats && (
+            <div className="bg-white/70 rounded-lg px-3 py-2 mb-3 text-xs text-gray-600">
+              매장판매일보 감지 — 전체 {posDailyStats.total}행 중 카카오엔터 <b>{posDailyStats.filtered}행</b> 필터
+              {posDailyStats.returnCount > 0 && (
+                <span className="ml-2">(판매 {posDailyStats.saleCount}건 + <span className="text-red-600 font-semibold">반품 {posDailyStats.returnCount}건</span>)</span>
+              )}
+            </div>
+          )}
+          <div className={`grid ${isPosDaily ? 'grid-cols-4' : 'grid-cols-3'} gap-3 mb-4`}>
             <div className="bg-white rounded-lg p-3 border">
               <div className="text-xs text-gray-500">매칭 성공</div>
               <div className={`text-lg font-bold text-${tabColor}-700`}>{matchedRows.length}건</div>
@@ -356,6 +498,16 @@ export default function SalesUpload() {
                 {parsedRows.length > 0 ? Math.round((matchedRows.length / parsedRows.length) * 100) : 0}%
               </div>
             </div>
+            {isPosDaily && (
+              <div className="bg-white rounded-lg p-3 border">
+                <div className="text-xs text-gray-500">판매/반품</div>
+                <div className="text-lg font-bold text-emerald-700">
+                  {matchedRows.filter((r) => r.saleType !== '반품').length}
+                  <span className="text-xs font-normal text-gray-400"> / </span>
+                  <span className="text-red-600">{matchedRows.filter((r) => r.saleType === '반품').length}</span>
+                </div>
+              </div>
+            )}
           </div>
 
           {/* 상세 테이블 */}
@@ -368,7 +520,8 @@ export default function SalesUpload() {
                 <thead className="bg-gray-50 sticky top-0">
                   <tr>
                     <th className="px-2 py-1 text-left">상태</th>
-                    <th className="px-2 py-1 text-left">바코드</th>
+                    {isPosDaily && <th className="px-2 py-1 text-left">구분</th>}
+                    <th className="px-2 py-1 text-left">{isPosDaily ? 'SKU코드' : '바코드'}</th>
                     <th className="px-2 py-1 text-left">SKU</th>
                     <th className="px-2 py-1 text-left">상품명</th>
                     <th className="px-2 py-1 text-right">수량</th>
@@ -380,6 +533,13 @@ export default function SalesUpload() {
                       <td className="px-2 py-1">
                         <span className={`inline-block w-2 h-2 rounded-full ${r.matched ? 'bg-emerald-500' : 'bg-red-500'}`} />
                       </td>
+                      {isPosDaily && (
+                        <td className="px-2 py-1">
+                          <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${
+                            r.saleType === '반품' ? 'bg-red-100 text-red-700' : 'bg-emerald-100 text-emerald-700'
+                          }`}>{r.saleType || '판매'}</span>
+                        </td>
+                      )}
                       <td className="px-2 py-1 font-mono">{r.barcode}</td>
                       <td className="px-2 py-1 text-gray-500">{r.skuId || '-'}</td>
                       <td className="px-2 py-1 truncate max-w-[200px]">{r.skuName || '미매칭'}</td>
@@ -404,7 +564,9 @@ export default function SalesUpload() {
               disabled={uploading || matchedRows.length === 0}
               className={`bg-${tabColor}-600 text-white px-4 py-1.5 rounded-lg text-sm font-medium hover:bg-${tabColor}-700 disabled:opacity-50`}
             >
-              {uploading ? '저장 중...' : `${activeTabInfo.label} ${matchedRows.length}건 저장`}
+              {uploading ? '저장 중...' : isPosDaily
+                ? `판매 ${matchedRows.filter((r) => r.saleType !== '반품').length}건 + 반품 ${matchedRows.filter((r) => r.saleType === '반품').length}건 저장`
+                : `${activeTabInfo.label} ${matchedRows.length}건 저장`}
             </button>
           </div>
         </div>

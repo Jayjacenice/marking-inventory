@@ -23,6 +23,7 @@ import ActivityHistory from './pages/admin/ActivityHistory';
 import InventoryManage from './pages/admin/InventoryManage';
 import StockLedger from './pages/admin/StockLedger';
 import SalesUpload from './pages/admin/SalesUpload';
+import TxHistory from './pages/admin/TxHistory';
 import SKUMaster from './pages/admin/SKUMaster';
 import OrderUpload from './pages/admin/OrderUpload';
 import Progress from './pages/admin/Progress';
@@ -191,6 +192,7 @@ function AppContent() {
         <Route path="/admin/users" element={<UserManage currentUserId={user.id} />} />
         <Route path="/admin/history" element={<ActivityHistory />} />
         <Route path="/admin/sales" element={<SalesUpload />} />
+        <Route path="/admin/tx-history" element={<TxHistory />} />
         <Route path="/admin/stock-ledger" element={<StockLedger />} />
         <Route path="/admin/sku-master" element={<SKUMaster currentUserId={user.id} />} />
         <Route path="/admin/orders" element={<OrderUpload currentUserId={user.id} />} />

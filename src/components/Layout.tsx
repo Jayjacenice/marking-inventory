@@ -21,6 +21,7 @@ import {
   BookOpen,
   ShoppingCart,
   List,
+  BarChart3,
 } from 'lucide-react';
 
 interface NavItem {
@@ -83,6 +84,12 @@ const navItems: NavItem[] = [
     label: '매장 입/출고 등록',
     path: '/admin/sales',
     icon: <ShoppingCart size={18} />,
+    roles: ['admin'],
+  },
+  {
+    label: '입/출고 현황',
+    path: '/admin/tx-history',
+    icon: <BarChart3 size={18} />,
     roles: ['admin'],
   },
   {
