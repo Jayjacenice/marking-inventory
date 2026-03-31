@@ -369,6 +369,13 @@ export default function ShipmentOut({ currentUser }: { currentUser: AppUser }) {
           .update({ status: '출고완료' })
           .eq('id', selectedWo.id);
         if (statusErr) throw statusErr;
+
+        // 연결된 온라인 주문도 출고완료로 변경
+        await supabase
+          .from('online_order')
+          .update({ status: '출고완료' })
+          .eq('work_order_id', selectedWo.id)
+          .in('status', ['발송대기', '이관중', '마킹중']);
       }
       // 마킹중 상태는 유지 (부분 출고)
       step++;

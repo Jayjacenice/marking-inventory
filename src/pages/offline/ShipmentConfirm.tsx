@@ -947,6 +947,11 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
           await supabase.from('work_order')
             .update({ status: '이관중', sent_detail: newDetail })
             .eq('id', woId);
+          // 연결된 온라인 주문도 이관중으로 변경
+          await supabase.from('online_order')
+            .update({ status: '이관중' })
+            .eq('work_order_id', woId)
+            .eq('status', '발송대기');
         } else {
           await supabase.from('work_order')
             .update({ sent_detail: newDetail })

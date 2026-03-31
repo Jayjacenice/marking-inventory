@@ -647,9 +647,15 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
         const allDone = ((allLines || []) as any[])
           .filter((l) => l.needs_marking)
           .every((l) => l.marked_qty >= l.received_qty);
+        const newStatus = allDone ? '마킹완료' : '마킹중';
         await supabase.from('work_order')
-          .update({ status: allDone ? '마킹완료' : '마킹중' })
+          .update({ status: newStatus })
           .eq('id', woId);
+        // 연결된 온라인 주문도 마킹 상태로 변경
+        await supabase.from('online_order')
+          .update({ status: newStatus })
+          .eq('work_order_id', woId)
+          .in('status', ['발송대기', '이관중', '마킹중']);
       }
 
       // Step 6: Activity log (중복 방지: 같은 날 같은 WO면 update)
