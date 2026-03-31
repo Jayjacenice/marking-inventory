@@ -1,5 +1,6 @@
 import { useState, useRef } from 'react';
 import { supabase } from '../../lib/supabase';
+import { supabaseAdmin } from '../../lib/supabaseAdmin';
 import { parseWorkOrderExcel, type RawOrderLine } from '../../lib/excelParser';
 import { Upload, CheckCircle, AlertTriangle, FileSpreadsheet } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
@@ -82,8 +83,9 @@ export default function WorkOrderUpload() {
 
     try {
       // 1. 모든 활성 작업지시서(이관준비~마킹완료)에서 이미 등록된 SKU 확인
+      //    RLS가 work_order 읽기를 차단하므로 supabaseAdmin 사용
       setSaveProgress({ current: 1, total: 5, step: '중복 확인 중...' });
-      const { data: existingWos } = await supabase
+      const { data: existingWos } = await supabaseAdmin
         .from('work_order')
         .select('id, download_date, status')
         .in('status', ['이관준비', '이관중', '입고확인완료', '마킹중', '마킹완료']);
@@ -94,7 +96,7 @@ export default function WorkOrderUpload() {
         const woIds = existingWos.map((w) => w.id);
         for (let i = 0; i < woIds.length; i += 10) {
           const batch = woIds.slice(i, i + 10);
-          const { data: existingLines } = await supabase
+          const { data: existingLines } = await supabaseAdmin
             .from('work_order_line')
             .select('finished_sku_id')
             .in('work_order_id', batch);
