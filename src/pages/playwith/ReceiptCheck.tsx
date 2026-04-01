@@ -4,6 +4,7 @@ import { recordTransaction, deleteSystemTransactions } from '../../lib/inventory
 import { type ProgressCallback } from '../../lib/workOrderRollback';
 import { notifySlack } from '../../lib/slackNotify';
 import { useStaleGuard } from '../../hooks/useStaleGuard';
+import { useLoadingTimeout } from '../../hooks/useLoadingTimeout';
 import { AlertTriangle, CheckCircle, ChevronLeft, ChevronRight, Download, FileUp, Trash2 } from 'lucide-react';
 import { generateTemplate, parseQtyExcel } from '../../lib/excelUtils';
 import ComparisonPanel, { type ComparisonRow } from '../../components/ComparisonPanel';
@@ -38,6 +39,7 @@ export default function ReceiptCheck({ currentUser }: { currentUser: AppUser }) 
   const [saveProgress, setSaveProgress] = useState<{ current: number; total: number; step: string } | null>(null);
   const [done, setDone] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  useLoadingTimeout(loading, setLoading, setError);
   const [uploadComparison, setUploadComparison] = useState<{ rows: ComparisonRow[]; unmatched: string[] } | null>(null);
   const [xlsxError, setXlsxError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -324,6 +326,7 @@ export default function ReceiptCheck({ currentUser }: { currentUser: AppUser }) 
         await deleteSystemTransactions({
           warehouseId: (warehouse as any).id,
           memo: `입고확인 (작업지시서 ${historyWorkOrder.date})`,
+          memoLike: `%입고확인%작업지시서 ${historyWorkOrder.date}%`,
         });
       }
 
@@ -381,6 +384,7 @@ export default function ReceiptCheck({ currentUser }: { currentUser: AppUser }) 
         skuName: item.skuName,
         barcode: item.barcode,
         qty: item.actualQty,
+        needsMarking: item.needsMarking,
       })),
       `입고수량_${selectedOrder?.download_date || '양식'}_${currentWaveNum}차.xlsx`
     );
@@ -516,9 +520,11 @@ export default function ReceiptCheck({ currentUser }: { currentUser: AppUser }) 
             }
           }
         } else {
-          // 단순출고 라인: 단순출고 풀에서만 소비
-          thisWaveQty = consumeMapDirect[line.finished_sku_id] ?? 0;
-          consumeMapDirect[line.finished_sku_id] = Math.max(0, (consumeMapDirect[line.finished_sku_id] || 0) - thisWaveQty);
+          // 단순출고 라인: 단순출고 풀에서만 소비 (ordered_qty - received_qty 잔량 초과 방지)
+          const remaining = Math.max(0, (line.ordered_qty || 0) - (line.received_qty || 0));
+          const available = consumeMapDirect[line.finished_sku_id] ?? 0;
+          thisWaveQty = Math.min(available, remaining);
+          consumeMapDirect[line.finished_sku_id] = Math.max(0, available - thisWaveQty);
         }
         lineWaveQtyMap[line.id] = thisWaveQty;
       }
@@ -547,31 +553,48 @@ export default function ReceiptCheck({ currentUser }: { currentUser: AppUser }) 
 
       if (pwWarehouse) {
         const pwWhId = (pwWarehouse as any).id;
-        for (let i = 0; i < activeItems.length; i += BATCH) {
-          const batch = activeItems.slice(i, i + BATCH);
+
+        // SKU별 수량 합산 (같은 SKU가 마킹/단순출고로 중복될 수 있음 → 동시 쓰기 방지)
+        const skuQtyMap: Record<string, number> = {};
+        for (const item of activeItems) {
+          skuQtyMap[item.skuId] = (skuQtyMap[item.skuId] || 0) + item.actualQty;
+        }
+        const skuEntries = Object.entries(skuQtyMap);
+
+        // 재고 업데이트: SKU별 합산 수량으로 1회만 (순차 처리로 경쟁 상태 방지)
+        for (let i = 0; i < skuEntries.length; i += BATCH) {
+          const batch = skuEntries.slice(i, i + BATCH);
           progressStep++;
-          setSaveProgress({ current: progressStep, total: stepsTotal, step: `재고 반영 중... (${Math.min(i + BATCH, activeItems.length)} / ${activeItems.length})` });
-          await Promise.all(batch.map(async (item) => {
+          setSaveProgress({ current: progressStep, total: stepsTotal, step: `재고 반영 중... (${Math.min(i + BATCH, skuEntries.length)} / ${skuEntries.length})` });
+          // 같은 배치 안에 같은 SKU 없으므로 Promise.all 안전
+          await Promise.all(batch.map(async ([skuId, totalQty]) => {
             const { data: existing } = await supabase
               .from('inventory')
               .select('quantity')
               .eq('warehouse_id', pwWhId)
-              .eq('sku_id', item.skuId)
+              .eq('sku_id', skuId)
               .maybeSingle();
-            const newQty = ((existing as any)?.quantity || 0) + item.actualQty;
+            const newQty = ((existing as any)?.quantity || 0) + totalQty;
             await supabase.from('inventory').upsert(
-              { warehouse_id: pwWhId, sku_id: item.skuId, quantity: newQty },
+              { warehouse_id: pwWhId, sku_id: skuId, quantity: newQty },
               { onConflict: 'warehouse_id,sku_id' }
             );
-            await recordTransaction({
+          }));
+        }
+
+        // 트랜잭션 기록: 원본 아이템 단위로 기록 (마킹/단순출고 구분 유지)
+        for (let i = 0; i < activeItems.length; i += BATCH) {
+          const batch = activeItems.slice(i, i + BATCH);
+          await Promise.all(batch.map((item) =>
+            recordTransaction({
               warehouseId: pwWhId,
               skuId: item.skuId,
               txType: '입고',
               quantity: item.actualQty,
               source: 'system',
               memo: `입고확인 ${currentWaveNum}차 (작업지시서 ${selectedOrder.download_date})`,
-            });
-          }));
+            })
+          ));
         }
       }
 
@@ -616,12 +639,12 @@ export default function ReceiptCheck({ currentUser }: { currentUser: AppUser }) 
         user: currentUser.name || currentUser.email,
         date: selectedOrder.download_date,
         items: items.filter((i) => i.actualQty > 0).map((i) => ({ name: i.skuName, qty: i.actualQty })),
-      }).catch(() => {});
+      }).catch((e) => console.warn('[비동기 후처리 실패]', e));
 
       // 온라인 주문 상태 업데이트: 이관중 → 마킹중 (FIFO)
       import('../../lib/onlineOrderSync').then(({ updateOnlineOrderBySkus }) => {
         const skuIds = items.filter((i) => i.actualQty > 0).map((i) => i.skuId);
-        updateOnlineOrderBySkus(skuIds, '마킹중', '이관중').catch(() => {});
+        updateOnlineOrderBySkus(skuIds, '마킹중', '이관중').catch((e) => console.warn('[비동기 후처리 실패]', e));
       });
     } catch (e: any) {
       setError(`입고 확인 처리 실패: ${e.message || '알 수 없는 오류'}. 잠시 후 다시 시도해주세요.`);

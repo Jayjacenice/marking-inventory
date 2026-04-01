@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { supabase } from '../../lib/supabase';
 import { useStaleGuard } from '../../hooks/useStaleGuard';
+import { useLoadingTimeout } from '../../hooks/useLoadingTimeout';
 import { supabaseAdmin } from '../../lib/supabaseAdmin';
 import type { UserRole } from '../../types';
 import { Plus, Pencil, Trash2, Eye, EyeOff, X } from 'lucide-react';
@@ -33,6 +34,7 @@ export default function UserManage({ currentUserId }: Props) {
   const isStale = useStaleGuard();
   const [users, setUsers] = useState<ManagedUser[]>([]);
   const [loading, setLoading] = useState(true);
+  useLoadingTimeout(loading, setLoading);
   const [showModal, setShowModal] = useState(false);
   const [editingUser, setEditingUser] = useState<ManagedUser | null>(null);
 

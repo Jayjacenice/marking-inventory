@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { supabaseAdmin } from '../../lib/supabaseAdmin';
 import { supabase } from '../../lib/supabase';
 import { useStaleGuard } from '../../hooks/useStaleGuard';
+import { useLoadingTimeout } from '../../hooks/useLoadingTimeout';
 import * as XLSX from 'xlsx';
 import {
   Database, Search, Download, Upload, Pencil, Trash2, Check, X,
@@ -22,6 +23,7 @@ export default function SKUMaster({ currentUserId }: { currentUserId: string }) 
   const isStale = useStaleGuard();
   const [skus, setSkus] = useState<SKU[]>([]);
   const [loading, setLoading] = useState(true);
+  useLoadingTimeout(loading, setLoading);
   const [searchText, setSearchText] = useState('');
   const [typeFilter, setTypeFilter] = useState('전체');
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);

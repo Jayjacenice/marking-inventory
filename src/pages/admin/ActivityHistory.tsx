@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { supabaseAdmin } from '../../lib/supabaseAdmin';
 import { useStaleGuard } from '../../hooks/useStaleGuard';
+import { useLoadingTimeout } from '../../hooks/useLoadingTimeout';
 import { ChevronLeft, ChevronRight, ChevronDown, ChevronUp, Download } from 'lucide-react';
 import * as XLSX from 'xlsx';
 
@@ -96,6 +97,7 @@ export default function ActivityHistory() {
   const [selectedDate, setSelectedDate] = useState(today);
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [loading, setLoading] = useState(true);
+  useLoadingTimeout(loading, setLoading);
   const [actionFilter, setActionFilter] = useState<string>('');
   const [userFilter, setUserFilter] = useState<string>('');
   const [users, setUsers] = useState<{ id: string; name: string; role: string }[]>([]);

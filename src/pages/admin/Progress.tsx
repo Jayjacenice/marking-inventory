@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback } from 'react';
 import { supabase } from '../../lib/supabase';
+import { useLoadingTimeout } from '../../hooks/useLoadingTimeout';
 
 /* ── 타입 ── */
 interface WoOption {
@@ -116,6 +117,7 @@ export default function Progress() {
   const [skuRows, setSkuRows] = useState<SkuRow[]>([]);
   const [activities, setActivities] = useState<ActivityItem[]>([]);
   const [loading, setLoading] = useState(true);
+  useLoadingTimeout(loading, setLoading);
   const [search, setSearch] = useState('');
   const [sortKey, setSortKey] = useState<'skuName' | 'ordered' | 'stage'>('skuName');
   const [expandedSku, setExpandedSku] = useState<string | null>(null);

@@ -2,8 +2,9 @@ import { type ChangeEvent, useEffect, useRef, useState } from 'react';
 import { supabase } from '../../lib/supabase';
 import { recordTransaction, deleteSystemTransactions } from '../../lib/inventoryTransaction';
 import { useStaleGuard } from '../../hooks/useStaleGuard';
+import { useLoadingTimeout } from '../../hooks/useLoadingTimeout';
 import { AlertTriangle, CheckCircle, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Download, Edit3, FileUp, Trash2, Truck, XCircle } from 'lucide-react';
-import { generateTemplate, parseQtyExcel } from '../../lib/excelUtils';
+import { generateTemplate, parseQtyExcel, buildMatchKey } from '../../lib/excelUtils';
 import ComparisonPanel, { type ComparisonRow } from '../../components/ComparisonPanel';
 import { TwoColumnSkeleton } from '../../components/LoadingSkeleton';
 import { notifySlack } from '../../lib/slackNotify';
@@ -71,6 +72,7 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
   const [confirmedWoId, setConfirmedWoId] = useState<string | null>(null);
   const [confirmedWoDate, setConfirmedWoDate] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  useLoadingTimeout(loading, setLoading, setError);
   const [uploadComparison, setUploadComparison] = useState<{ rows: ComparisonRow[]; unmatched: string[] } | null>(null);
   const [xlsxError, setXlsxError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -427,23 +429,32 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
         }
       }
 
-      const shipmentItems: ShipmentItem[] = Object.values(componentMap).map((c) => ({
-        lineId: c.lineId,
-        skuId: c.skuId,
-        skuName: c.skuName,
-        barcode: c.barcode,
-        orderedQty: c.needed,
-        sentQty: c.needed,
-        inventoryQty: inventoryMap[c.skuId] || 0,
-        isShortage: (inventoryMap[c.skuId] || 0) < c.needed,
-        isMarking: c.isMarking,
-        needsMarking: c.needsMarking,
-        checked: true,
-      }));
+      const shipmentItems: ShipmentItem[] = Object.values(componentMap)
+        .filter((c) => (inventoryMap[c.skuId] || 0) > 0) // 재고 0이면 목록에서 제외
+        .map((c) => {
+          const inv = inventoryMap[c.skuId] || 0;
+          const qty = Math.min(c.needed, inv); // 재고만큼만 발송 가능
+          return {
+            lineId: c.lineId,
+            skuId: c.skuId,
+            skuName: c.skuName,
+            barcode: c.barcode,
+            orderedQty: c.needed,
+            sentQty: qty,
+            inventoryQty: inv,
+            isShortage: inv < c.needed,
+            isMarking: c.isMarking,
+            needsMarking: c.needsMarking,
+            checked: true,
+          };
+        });
 
       setItems(shipmentItems);
       // 아코디언 캐시에 저장
       setWoItemsCache((prev) => ({ ...prev, [wo.id]: shipmentItems }));
+      // 헤더 잔량을 실제 발송 가능 수량으로 갱신 (enrichWo 근사치 → 정확한 값)
+      const actualShippable = shipmentItems.reduce((s, i) => s + i.sentQty, 0);
+      setWorkOrders((prev) => prev.map((w) => w.id === wo.id ? { ...w, remainingQty: actualShippable } : w));
     } catch (e: any) {
       if (!isStale()) setError(`발주 데이터 조회 실패: ${e.message || '알 수 없는 오류'}`);
     } finally {
@@ -609,23 +620,56 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
     setDeleting(true);
     setError(null);
     try {
-      // 1) work_order_line.sent_qty → 0 초기화
+      // 1) 삭제 대상 차수의 발송 수량 조회 (activity_log에서)
+      const { data: targetLog } = await supabase
+        .from('activity_log')
+        .select('summary')
+        .eq('work_order_id', historyWorkOrder.id)
+        .eq('action_type', 'shipment_confirm')
+        .eq('action_date', selectedDate)
+        .limit(1)
+        .maybeSingle();
+      const deletedItems: { skuId: string; sentQty: number }[] =
+        (targetLog as any)?.summary?.items || [];
+
+      // 다른 차수의 발송이 남아있는지 확인
+      const { data: otherWaves } = await supabase
+        .from('activity_log')
+        .select('id')
+        .eq('work_order_id', historyWorkOrder.id)
+        .eq('action_type', 'shipment_confirm')
+        .neq('action_date', selectedDate);
+      const hasOtherWaves = (otherWaves || []).length > 0;
+
+      // 1-1) work_order_line.sent_qty 차감 (삭제 차수 수량만)
       const { data: lines } = await supabase
         .from('work_order_line')
-        .select('id')
+        .select('id, sent_qty')
         .eq('work_order_id', historyWorkOrder.id);
-      for (const line of (lines || []) as any[]) {
-        await supabase
-          .from('work_order_line')
-          .update({ sent_qty: 0 })
-          .eq('id', line.id);
+      if (hasOtherWaves && deletedItems.length > 0) {
+        // 다른 차수 존재 → sent_detail에서 삭제분만 차감
+        const { data: woData } = await supabase
+          .from('work_order').select('sent_detail').eq('id', historyWorkOrder.id).single();
+        const detail: Record<string, number> = (woData as any)?.sent_detail || {};
+        for (const item of deletedItems) {
+          detail[item.skuId] = Math.max(0, (detail[item.skuId] || 0) - item.sentQty);
+        }
+        await supabase.from('work_order').update({ sent_detail: detail }).eq('id', historyWorkOrder.id);
+      } else {
+        // 유일한 차수 → sent_qty 0 초기화, sent_detail 초기화
+        for (const line of (lines || []) as any[]) {
+          await supabase.from('work_order_line').update({ sent_qty: 0 }).eq('id', line.id);
+        }
+        await supabase.from('work_order').update({ sent_detail: {} }).eq('id', historyWorkOrder.id);
       }
 
-      // 2) work_order.status → '이관준비' 복원
-      await supabase
-        .from('work_order')
-        .update({ status: '이관준비' })
-        .eq('id', historyWorkOrder.id);
+      // 2) work_order.status 복원 (다른 차수 없으면 이관준비, 있으면 유지)
+      if (!hasOtherWaves) {
+        await supabase
+          .from('work_order')
+          .update({ status: '이관준비' })
+          .eq('id', historyWorkOrder.id);
+      }
 
       // 3) inventory_transaction 삭제 + inventory 역반영
       const { data: warehouse } = await supabase
@@ -694,6 +738,7 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
         skuName: item.skuName,
         barcode: item.barcode,
         qty: item.sentQty,
+        needsMarking: item.needsMarking,
       })),
       `발송수량_${selectedWo?.download_date || '양식'}.xlsx`
     );
@@ -707,16 +752,23 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
     try {
       const result = await parseQtyExcel(
         file,
-        items.map((item) => ({ skuId: item.skuId, skuName: item.skuName, barcode: item.barcode }))
+        items.map((item) => ({ skuId: item.skuId, skuName: item.skuName, barcode: item.barcode, needsMarking: item.needsMarking }))
       );
-      const matchMap = new Map(result.matched.map((m) => [m.skuId, m.uploadedQty]));
+      // matchKey로 매칭 (구분 컬럼이 있으면 마킹/단순 분리, 없으면 SKU 기준 폴백)
+      const matchMap = new Map(result.matched.map((m) => [m.matchKey, m.uploadedQty]));
       setItems((prev) =>
-        prev.map((item) =>
-          matchMap.has(item.skuId) ? { ...item, sentQty: matchMap.get(item.skuId)!, checked: matchMap.get(item.skuId)! > 0 } : item
-        )
+        prev.map((item) => {
+          const key = buildMatchKey(item.skuId, item.needsMarking);
+          return matchMap.has(key) ? { ...item, sentQty: matchMap.get(key)!, checked: matchMap.get(key)! > 0 }
+            : matchMap.has(item.skuId) ? { ...item, sentQty: matchMap.get(item.skuId)!, checked: matchMap.get(item.skuId)! > 0 }
+            : item;
+        })
       );
       const rows: ComparisonRow[] = result.matched.map((m) => {
-        const item = items.find((i) => i.skuId === m.skuId);
+        const item = items.find((i) => {
+          const key = buildMatchKey(i.skuId, i.needsMarking);
+          return m.matchKey === key || m.matchKey === i.skuId;
+        });
         return {
           skuId: m.skuId,
           skuName: item?.skuName || m.skuId,
@@ -783,12 +835,14 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
           }
         }
 
-        // sentQty = orderedQty, shortage 계산
-        const merged = Object.values(mergedMap).map((m) => ({
-          ...m,
-          sentQty: m.orderedQty,
-          isShortage: m.inventoryQty < m.orderedQty,
-        }));
+        // sentQty = min(orderedQty, inventoryQty), 재고 0이면 제외
+        const merged = Object.values(mergedMap)
+          .filter((m) => m.inventoryQty > 0)
+          .map((m) => ({
+            ...m,
+            sentQty: Math.min(m.orderedQty, m.inventoryQty),
+            isShortage: m.inventoryQty < m.orderedQty,
+          }));
 
         setMergedItems(merged);
         return currentCache; // 캐시는 변경 없이 반환
@@ -847,6 +901,7 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
         skuName: item.skuName,
         barcode: item.barcode,
         qty: item.sentQty,
+        needsMarking: item.needsMarking,
       })),
       `전체발송수량_${today}.xlsx`
     );
@@ -860,16 +915,22 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
     try {
       const result = await parseQtyExcel(
         file,
-        mergedItems.map((item) => ({ skuId: item.skuId, skuName: item.skuName, barcode: item.barcode }))
+        mergedItems.map((item) => ({ skuId: item.skuId, skuName: item.skuName, barcode: item.barcode, needsMarking: item.needsMarking }))
       );
-      const matchMap = new Map(result.matched.map((m) => [m.skuId, m.uploadedQty]));
+      const matchMap = new Map(result.matched.map((m) => [m.matchKey, m.uploadedQty]));
       setMergedItems((prev) =>
-        prev.map((item) =>
-          matchMap.has(item.skuId) ? { ...item, sentQty: matchMap.get(item.skuId)!, checked: matchMap.get(item.skuId)! > 0 } : item
-        )
+        prev.map((item) => {
+          const key = buildMatchKey(item.skuId, item.needsMarking);
+          return matchMap.has(key) ? { ...item, sentQty: matchMap.get(key)!, checked: matchMap.get(key)! > 0 }
+            : matchMap.has(item.skuId) ? { ...item, sentQty: matchMap.get(item.skuId)!, checked: matchMap.get(item.skuId)! > 0 }
+            : item;
+        })
       );
       const rows: ComparisonRow[] = result.matched.map((m) => {
-        const item = mergedItems.find((i) => i.skuId === m.skuId);
+        const item = mergedItems.find((i) => {
+          const key = buildMatchKey(i.skuId, i.needsMarking);
+          return m.matchKey === key || m.matchKey === i.skuId;
+        });
         return {
           skuId: m.skuId,
           skuName: item?.skuName || m.skuId,
@@ -1048,8 +1109,9 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
         stepNum++;
       }
 
-      // Step D: 재고 차감 1회만 (SKU별 총 발송량 합산)
+      // Step D: 재고 차감 — WO별로 분리 기록 (롤백 시 WO 단위 복원 가능)
       setMergedConfirmProgress({ current: stepNum, total: totalSteps, step: '재고 차감 중...' });
+      // SKU별 총 발송량 합산 (재고 차감은 1회)
       const totalSentBySku: Record<string, number> = {};
       for (const item of finalItems) {
         if (item.sentQty > 0) {
@@ -1061,6 +1123,7 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
         .from('warehouse').select('id').eq('name', '오프라인샵').maybeSingle();
       if (warehouse) {
         const whId = (warehouse as any).id;
+        // 재고 차감은 SKU별 총량으로 1회
         const skuEntries = Object.entries(totalSentBySku);
         const BATCH = 10;
         for (let i = 0; i < skuEntries.length; i += BATCH) {
@@ -1074,15 +1137,26 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
                 .update({ quantity: Math.max(0, (inv as any).quantity - qty) })
                 .eq('id', (inv as any).id);
             }
-            await recordTransaction({
-              warehouseId: whId,
-              skuId,
-              txType: '출고',
-              quantity: qty,
-              source: 'system',
-              memo: `전체발송 확인`,
-            });
           }));
+        }
+        // 트랜잭션 기록은 WO별로 분리 (memo에 작업지시서 날짜 포함 → 롤백 가능)
+        for (const woId of affectedWoIds) {
+          const woDate = workOrders.find((w) => w.id === woId)?.download_date || '';
+          const woSkuAlloc = woAllocation[woId] || {};
+          const entries = Object.entries(woSkuAlloc).filter(([, q]) => q > 0);
+          for (let i = 0; i < entries.length; i += BATCH) {
+            const batch = entries.slice(i, i + BATCH);
+            await Promise.all(batch.map(([skuId, qty]) =>
+              recordTransaction({
+                warehouseId: whId,
+                skuId,
+                txType: '출고',
+                quantity: qty,
+                source: 'system',
+                memo: `발송확인 (작업지시서 ${woDate})`,
+              })
+            ));
+          }
         }
       }
       stepNum++;
@@ -1132,7 +1206,7 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
         user: currentUser.name || currentUser.email,
         date: `전체 (${affectedWoIds.length}건)`,
         items: finalItems.filter((i) => i.sentQty > 0).map((i) => ({ name: i.skuName, qty: i.sentQty })),
-      }).catch(() => {});
+      }).catch((e) => console.warn('[비동기 후처리 실패]', e));
 
       // 온라인 주문 상태 업데이트: 신규 → 이관중 (FIFO)
       import('../../lib/onlineOrderSync').then(({ updateOnlineOrderStatus }) => {
@@ -1140,7 +1214,7 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
           finalItems.filter((i) => i.sentQty > 0).map((i) => ({ skuId: i.skuId, qty: i.sentQty })),
           '이관중',
           '신규',
-        ).catch(() => {});
+        ).catch((e) => console.warn('[비동기 후처리 실패]', e));
       });
     } catch (e: any) {
       setError(`전체 발송 처리 실패: ${e.message || '알 수 없는 오류'}. 잠시 후 다시 시도해주세요.`);
@@ -1372,7 +1446,7 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
         user: currentUser.name || currentUser.email,
         date: selectedWo.download_date,
         items: finalItems.filter((i) => i.sentQty > 0).map((i) => ({ name: i.skuName, qty: i.sentQty })),
-      }).catch(() => {});
+      }).catch((e) => console.warn('[비동기 후처리 실패]', e));
 
       // 온라인 주문 상태 업데이트: 신규 → 이관중 (FIFO)
       import('../../lib/onlineOrderSync').then(({ updateOnlineOrderStatus }) => {
@@ -1380,7 +1454,7 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
           finalItems.filter((i) => i.sentQty > 0).map((i) => ({ skuId: i.skuId, qty: i.sentQty })),
           '이관중',
           '신규',
-        ).catch(() => {});
+        ).catch((e) => console.warn('[비동기 후처리 실패]', e));
       });
     } catch (e: any) {
       setError(`발송 처리 실패: ${e.message || '알 수 없는 오류'}. 잠시 후 다시 시도해주세요.`);

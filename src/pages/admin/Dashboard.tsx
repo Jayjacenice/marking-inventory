@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useStaleGuard } from '../../hooks/useStaleGuard';
+import { useLoadingTimeout } from '../../hooks/useLoadingTimeout';
 import { supabase } from '../../lib/supabase';
 import { Trash2, AlertTriangle, CheckCircle, XCircle, Eye, RotateCcw, Settings } from 'lucide-react';
 import { CardSkeleton } from '../../components/LoadingSkeleton';
@@ -7,11 +8,16 @@ import {
   getSteps,
   getStepStates,
   getRollbackableStep,
+  getRollbackableSteps,
   getRollbackDescription,
   executeRollback,
   deleteWorkOrderCompletely,
   getMarkingSessions,
+  getShipmentSessions,
+  getReceiptSessions,
+  getShipoutSessions,
   type MarkingSession,
+  type RollbackStep,
   type ProgressCallback,
 } from '../../lib/workOrderRollback';
 import type { WorkOrderStatus, AppUser } from '../../types';
@@ -53,6 +59,7 @@ export default function Dashboard({ currentUser }: DashboardProps) {
   const [activeOrders, setActiveOrders] = useState<ActiveOrder[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  useLoadingTimeout(loading, setLoading, setError);
   const [confirmId, setConfirmId] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
 
@@ -67,10 +74,12 @@ export default function Dashboard({ currentUser }: DashboardProps) {
   const [rolling, setRolling] = useState(false);
   const [rollbackProgress, setRollbackProgress] = useState<{ current: number; total: number; step: string } | null>(null);
 
-  // 마킹 세션 (날짜/시점별 롤백용)
-  const [markingSessions, setMarkingSessions] = useState<MarkingSession[]>([]);
+  // 단계별 세션 (날짜/시점별 롤백용) — 모든 단계 공통
+  const [rollbackSessions, setRollbackSessions] = useState<MarkingSession[]>([]);
   const [selectedSessions, setSelectedSessions] = useState<Set<string>>(new Set());
   const [rollbackMode, setRollbackMode] = useState<'all' | 'select'>('all');
+  const [rollbackableSteps, setRollbackableSteps] = useState<RollbackStep[]>([]);
+  const [selectedRollbackStep, setSelectedRollbackStep] = useState<RollbackStep | null>(null);
 
   // 잔량 관리 모달
   const [remainingModal, setRemainingModal] = useState<{woId: string; woDate: string; lines: RemainingLine[]} | null>(null);
@@ -153,16 +162,20 @@ export default function Dashboard({ currentUser }: DashboardProps) {
   };
 
   // ── 롤백 실행 ──
-  const loadMarkingSessions = async (woId: string) => {
-    const sessions = await getMarkingSessions(woId);
-    setMarkingSessions(sessions);
+  const loadSessions = async (woId: string, step: string) => {
+    let sessions: MarkingSession[] = [];
+    if (step === '발송') sessions = await getShipmentSessions(woId);
+    else if (step === '입고') sessions = await getReceiptSessions(woId);
+    else if (step === '마킹') sessions = await getMarkingSessions(woId);
+    else if (step === '출고') sessions = await getShipoutSessions(woId);
+    setRollbackSessions(sessions);
     setSelectedSessions(new Set());
     setRollbackMode('all');
   };
 
   const handleRollback = async () => {
     if (!manageOrder) return;
-    const step = getRollbackableStep(manageOrder.status);
+    const step = selectedRollbackStep || getRollbackableStep(manageOrder.status);
     if (!step) return;
     setRolling(true);
     setRollbackProgress(null);
@@ -172,7 +185,7 @@ export default function Dashboard({ currentUser }: DashboardProps) {
         setRollbackProgress({ current, total, step: stepName });
       };
 
-      if (step === '마킹' && rollbackMode === 'select' && selectedSessions.size > 0) {
+      if (rollbackMode === 'select' && selectedSessions.size > 0) {
         // 선택한 날짜들을 순차 롤백
         const dates = [...selectedSessions];
         for (let i = 0; i < dates.length; i++) {
@@ -215,7 +228,7 @@ export default function Dashboard({ currentUser }: DashboardProps) {
       setSuccessMsg(`${step} 롤백이 완료되었습니다.`);
       setManageOrder(null);
       setRollbackConfirm(false);
-      setMarkingSessions([]);
+      setRollbackSessions([]);
       setSelectedSessions(new Set());
       loadData();
     } catch (e: any) {
@@ -662,7 +675,12 @@ export default function Dashboard({ currentUser }: DashboardProps) {
                           </button>
                         )}
                         <button
-                          onClick={() => setManageOrder({ id: wo.id, date: wo.downloadDate, status: wo.status as WorkOrderStatus })}
+                          onClick={async () => {
+                            const order = { id: wo.id, date: wo.downloadDate, status: wo.status as WorkOrderStatus };
+                            setManageOrder(order);
+                            const steps = await getRollbackableSteps(wo.id, wo.status as WorkOrderStatus);
+                            setRollbackableSteps(steps);
+                          }}
                           className="px-2.5 py-1 text-xs font-medium text-gray-600 bg-gray-100 rounded-lg hover:bg-gray-200 flex items-center gap-1"
                           title="관리"
                         >
@@ -849,58 +867,54 @@ export default function Dashboard({ currentUser }: DashboardProps) {
             })()}
 
             {/* 롤백 가능 단계 */}
-            {(() => {
-              const step = getRollbackableStep(manageOrder.status);
-              if (!step) {
-                return (
-                  <div className="bg-gray-50 rounded-xl p-4 text-center">
-                    <p className="text-sm text-gray-500">현재 롤백 가능한 단계가 없습니다.</p>
-                    <p className="text-xs text-gray-400 mt-1">상태: {manageOrder.status}</p>
-                  </div>
-                );
-              }
-              const descriptions = getRollbackDescription(step);
-              return (
-                <div className="space-y-3">
-                  <div className="flex items-center gap-2">
-                    <RotateCcw size={14} className="text-orange-500" />
-                    <p className="text-sm font-semibold text-gray-700">롤백 가능: <span className="text-orange-600">{step}</span></p>
-                  </div>
-                  <div className="bg-orange-50 border border-orange-200 rounded-xl p-3 space-y-1.5">
-                    <p className="text-xs font-semibold text-orange-700">롤백 시 다음이 처리됩니다:</p>
-                    {descriptions.map((desc, i) => (
-                      <p key={i} className="text-xs text-orange-600 flex items-start gap-1.5">
-                        <span className="mt-0.5">•</span>{desc}
-                      </p>
-                    ))}
-                  </div>
+            {rollbackableSteps.length === 0 ? (
+              <div className="bg-gray-50 rounded-xl p-4 text-center">
+                <p className="text-sm text-gray-500">현재 롤백 가능한 단계가 없습니다.</p>
+                <p className="text-xs text-gray-400 mt-1">상태: {manageOrder.status}</p>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                <div className="flex items-center gap-2">
+                  <RotateCcw size={14} className="text-orange-500" />
+                  <p className="text-sm font-semibold text-gray-700">롤백 가능 단계</p>
                 </div>
-              );
-            })()}
+                {rollbackableSteps.map((step) => {
+                  const descriptions = getRollbackDescription(step as any);
+                  return (
+                    <div key={step} className="bg-orange-50 border border-orange-200 rounded-xl p-3 space-y-1.5">
+                      <div className="flex items-center justify-between">
+                        <p className="text-xs font-semibold text-orange-700">{step} 롤백</p>
+                        <button
+                          onClick={async () => {
+                            setSelectedRollbackStep(step);
+                            await loadSessions(manageOrder.id, step as any);
+                            setRollbackConfirm(true);
+                          }}
+                          className="px-3 py-1 bg-orange-500 text-white rounded-lg text-xs font-semibold hover:bg-orange-600 flex items-center gap-1"
+                        >
+                          <RotateCcw size={12} />
+                          선택
+                        </button>
+                      </div>
+                      {descriptions.map((desc, i) => (
+                        <p key={i} className="text-xs text-orange-600 flex items-start gap-1.5">
+                          <span className="mt-0.5">•</span>{desc}
+                        </p>
+                      ))}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
 
             {/* 버튼 */}
             <div className="flex gap-3 pt-1">
               <button
-                onClick={() => { setManageOrder(null); setMarkingSessions([]); }}
+                onClick={() => { setManageOrder(null); setRollbackSessions([]); setRollbackableSteps([]); setSelectedRollbackStep(null); }}
                 className="flex-1 py-2.5 bg-gray-100 text-gray-700 rounded-xl text-sm font-semibold hover:bg-gray-200"
               >
                 닫기
               </button>
-              {getRollbackableStep(manageOrder.status) && (
-                <button
-                  onClick={async () => {
-                    const step = getRollbackableStep(manageOrder.status);
-                    if (step === '마킹') {
-                      await loadMarkingSessions(manageOrder.id);
-                    }
-                    setRollbackConfirm(true);
-                  }}
-                  className="flex-1 py-2.5 bg-orange-500 text-white rounded-xl text-sm font-semibold hover:bg-orange-600 flex items-center justify-center gap-1.5"
-                >
-                  <RotateCcw size={14} />
-                  {getRollbackableStep(manageOrder.status)} 롤백
-                </button>
-              )}
             </div>
           </div>
         </div>
@@ -914,13 +928,13 @@ export default function Dashboard({ currentUser }: DashboardProps) {
               <div className="flex items-center gap-2">
                 <AlertTriangle size={18} className="text-red-500" />
                 <h3 className="text-lg font-bold text-gray-900">
-                  {getRollbackableStep(manageOrder.status) === '마킹' ? '마킹 롤백 — 범위 선택' : '정말 롤백하시겠습니까?'}
+                  {rollbackSessions.length > 0 ? `${selectedRollbackStep || getRollbackableStep(manageOrder.status)} 롤백 — 범위 선택` : '정말 롤백하시겠습니까?'}
                 </h3>
               </div>
             </div>
             <div className="px-6 py-4 space-y-3">
-              {/* 마킹 단계: 날짜/시점 선택 UI */}
-              {getRollbackableStep(manageOrder.status) === '마킹' && markingSessions.length > 0 ? (
+              {/* 단계별 날짜/시점 선택 UI */}
+              {rollbackSessions.length > 0 ? (
                 <div className="space-y-3">
                   {/* 전체 롤백 옵션 */}
                   <label className="flex items-center gap-3 p-3 rounded-lg border border-gray-200 cursor-pointer hover:bg-gray-50 transition-colors">
@@ -934,7 +948,7 @@ export default function Dashboard({ currentUser }: DashboardProps) {
                     <div className="flex-1">
                       <p className="text-sm font-semibold text-gray-800">전체 롤백</p>
                       <p className="text-xs text-gray-500">
-                        {markingSessions.reduce((s, m) => s + m.totalQty, 0)}개, {markingSessions.length}건 모두 삭제
+                        {rollbackSessions.reduce((s, m) => s + m.totalQty, 0)}개, {rollbackSessions.length}건 모두 삭제
                       </p>
                     </div>
                   </label>
@@ -957,7 +971,7 @@ export default function Dashboard({ currentUser }: DashboardProps) {
                   {/* 세션 목록 (선택 모드일 때만) */}
                   {rollbackMode === 'select' && (
                     <div className="space-y-2 pl-2">
-                      {markingSessions.map((session) => {
+                      {rollbackSessions.map((session) => {
                         const key = session.date;
                         const time = new Date(session.createdAt).toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' });
                         const dateLabel = session.date.slice(5); // MM-DD
@@ -998,7 +1012,7 @@ export default function Dashboard({ currentUser }: DashboardProps) {
                 <>
                   <p className="text-sm text-gray-700">
                     작업지시서 <span className="font-semibold">{manageOrder.date}</span>의{' '}
-                    <span className="font-semibold text-orange-600">{getRollbackableStep(manageOrder.status)}</span> 실적이
+                    <span className="font-semibold text-orange-600">{selectedRollbackStep || getRollbackableStep(manageOrder.status)}</span> 실적이
                     모두 삭제되고 재고가 역반영됩니다.
                   </p>
                 </>
@@ -1027,7 +1041,7 @@ export default function Dashboard({ currentUser }: DashboardProps) {
             </div>
             <div className="px-6 py-4 border-t border-gray-100 flex gap-3">
               <button
-                onClick={() => { setRollbackConfirm(false); setMarkingSessions([]); setSelectedSessions(new Set()); }}
+                onClick={() => { setRollbackConfirm(false); setRollbackSessions([]); setSelectedSessions(new Set()); }}
                 disabled={rolling}
                 className="flex-1 py-2.5 border border-gray-300 rounded-lg text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
               >

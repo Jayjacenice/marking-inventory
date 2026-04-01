@@ -3,6 +3,7 @@ import { supabase } from '../../lib/supabase';
 import { recordTransaction } from '../../lib/inventoryTransaction';
 import { rollbackShipmentOut, type ProgressCallback } from '../../lib/workOrderRollback';
 import { useStaleGuard } from '../../hooks/useStaleGuard';
+import { useLoadingTimeout } from '../../hooks/useLoadingTimeout';
 import { AlertTriangle, CheckCircle, ChevronLeft, ChevronRight, Download, FileUp, Trash2, Truck, Info } from 'lucide-react';
 import { generateTemplate, parseQtyExcel } from '../../lib/excelUtils';
 import ComparisonPanel, { type ComparisonRow } from '../../components/ComparisonPanel';
@@ -37,6 +38,7 @@ export default function ShipmentOut({ currentUser }: { currentUser: AppUser }) {
   const [confirmProgress, setConfirmProgress] = useState<{ current: number; total: number; step: string } | null>(null);
   const [confirmed, setConfirmed] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  useLoadingTimeout(loading, setLoading, setError);
   const [uploadComparison, setUploadComparison] = useState<{ rows: ComparisonRow[]; unmatched: string[] } | null>(null);
   const [xlsxError, setXlsxError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -155,15 +157,14 @@ export default function ShipmentOut({ currentUser }: { currentUser: AppUser }) {
         }
       }
 
-      // 4. finished_sku_id 수준 집계 (BOM 전개 없음!)
+      // 4. finished_sku_id 수준 집계
       const itemMap: Record<string, ShipmentOutItem> = {};
-      for (const line of lineList) {
-        // 마킹키트 단품(26MK-)은 마킹 작업 대상이 아니므로 단순출고처럼 처리
-        const isMarkingKitDirect = line.needs_marking && (line.finished_sku_id as string).startsWith('26MK-');
-        const qty = (line.needs_marking && !isMarkingKitDirect)
-          ? (markingTotals[line.id] || 0)     // 마킹 완성품: daily_marking 합산
-          : Math.min(line.ordered_qty || 0, line.received_qty || 0); // 단품/마킹키트 단품: 주문 수량 이내로 제한
 
+      // A. 단품(needs_marking=false): 작업지시서 라인 기준 — min(ordered, received)
+      for (const line of lineList) {
+        const isMarkingKitDirect = line.needs_marking && (line.finished_sku_id as string).startsWith('26MK-');
+        if (line.needs_marking && !isMarkingKitDirect) continue; // 마킹 완성품은 B에서 처리
+        const qty = Math.min(line.ordered_qty || 0, line.received_qty || 0);
         if (qty <= 0) continue;
 
         const key = line.finished_sku_id;
@@ -176,10 +177,40 @@ export default function ShipmentOut({ currentUser }: { currentUser: AppUser }) {
             shipQty: 0,
             inventoryQty: key in inventoryMap ? inventoryMap[key] : null,
             isShortage: false,
-            needsMarking: isMarkingKitDirect ? false : line.needs_marking,
+            needsMarking: false,
           };
         }
         itemMap[key].availableQty += qty;
+      }
+
+      // B. 마킹 완성품: 플레이위즈 재고를 직접 사용 (예정+예정외 모두 포함)
+      // 완제품 SKU명 조회를 위해 배치 조회
+      const finishedSkuIds = Object.entries(inventoryMap)
+        .filter(([skuId, qty]) => qty > 0 && skuId.startsWith('26UN-') && skuId.includes('_'))
+        .map(([skuId]) => skuId);
+
+      if (finishedSkuIds.length > 0) {
+        const { data: skuInfos } = await supabase
+          .from('sku')
+          .select('sku_id, sku_name, barcode')
+          .in('sku_id', finishedSkuIds);
+        const skuInfoMap = new Map((skuInfos || []).map((s: any) => [s.sku_id, s]));
+
+        for (const skuId of finishedSkuIds) {
+          const qty = inventoryMap[skuId];
+          if (itemMap[skuId]) continue; // 단품으로 이미 등록된 경우 스킵
+          const info = skuInfoMap.get(skuId);
+          itemMap[skuId] = {
+            finishedSkuId: skuId,
+            skuName: info?.sku_name || skuId,
+            barcode: info?.barcode || null,
+            availableQty: qty,
+            shipQty: 0,
+            inventoryQty: qty,
+            isShortage: false,
+            needsMarking: true,
+          };
+        }
       }
 
       // 이전 출고분 차감 후 출고 가능 수량 계산
@@ -187,13 +218,16 @@ export default function ShipmentOut({ currentUser }: { currentUser: AppUser }) {
         .map((item) => {
           const shipped = previousShipped[item.finishedSkuId] || 0;
           const adjusted = Math.max(0, item.availableQty - shipped);
+          // 단품(needsMarking=false)은 마킹 소비와 무관하게 입고 수량 기준으로 출고 가능
+          // → 부족 판단을 inventory 대신 availableQty(= min(ordered, received)) 기준
+          const isShort = item.needsMarking
+            ? (item.finishedSkuId in inventoryMap ? inventoryMap[item.finishedSkuId] < adjusted : false)
+            : false; // 단품은 입고 수량으로 이미 가용량이 확정됨 → 부족 없음
           return {
             ...item,
             availableQty: adjusted,
-            shipQty: adjusted,
-            isShortage: item.finishedSkuId in inventoryMap
-              ? inventoryMap[item.finishedSkuId] < adjusted
-              : false,
+            shipQty: 0, // 엑셀 업로드 또는 수동 입력 전까지 0
+            isShortage: isShort,
           };
         })
         .filter((item) => item.availableQty > 0);
@@ -453,12 +487,12 @@ export default function ShipmentOut({ currentUser }: { currentUser: AppUser }) {
         date: selectedWo.download_date,
         items: shippedItems.map((i) => ({ name: i.skuName, qty: i.shipQty })),
         extra: selectedWo.status === '마킹중' ? '_부분 출고 (마킹 진행 중)_' : undefined,
-      }).catch(() => {});
+      }).catch((e) => console.warn('[비동기 후처리 실패]', e));
 
       // 온라인 주문 상태 업데이트: 마킹중 → 출고완료 (FIFO)
       import('../../lib/onlineOrderSync').then(({ updateOnlineOrderBySkus }) => {
         const skuIds = shippedItems.map((i) => i.finishedSkuId);
-        updateOnlineOrderBySkus(skuIds, '출고완료', '마킹중').catch(() => {});
+        updateOnlineOrderBySkus(skuIds, '출고완료', '마킹중').catch((e) => console.warn('[비동기 후처리 실패]', e));
       });
     } catch (e: any) {
       setError(`출고 처리 실패: ${e.message || '알 수 없는 오류'}. 잠시 후 다시 시도해주세요.`);
@@ -633,6 +667,8 @@ export default function ShipmentOut({ currentUser }: { currentUser: AppUser }) {
   const totalMarkingQty = markingItems.reduce((s, i) => s + i.shipQty, 0);
   const totalDirectQty = directItems.reduce((s, i) => s + i.shipQty, 0);
   const totalShipQty = totalMarkingQty + totalDirectQty;
+  const totalMarkingAvailable = markingItems.reduce((s, i) => s + i.availableQty, 0);
+  const totalDirectAvailable = directItems.reduce((s, i) => s + i.availableQty, 0);
 
   return (
     <div className="space-y-5 max-w-lg">
@@ -848,19 +884,25 @@ export default function ShipmentOut({ currentUser }: { currentUser: AppUser }) {
           <p className="text-sm text-gray-500 mt-0.5">{selectedWo?.download_date} 기준</p>
         </div>
 
-        {/* 총 수량 합계 */}
+        {/* 총 수량 합계 (예정 / 실적) */}
         <div className="px-5 py-3 bg-emerald-50/60 border-b border-gray-100 space-y-1">
           <div className="flex items-center justify-between text-sm">
-            <span className="text-purple-700">마킹 완성품 소계</span>
-            <span className="font-semibold text-purple-800">{totalMarkingQty}개</span>
+            <span className="text-purple-700">마킹 완성품 소계 (예정 / 실적)</span>
+            <span className="font-semibold text-purple-800">
+              {totalMarkingAvailable}개 / <span className={totalMarkingQty !== totalMarkingAvailable ? 'text-orange-600' : ''}>{totalMarkingQty}개</span>
+            </span>
           </div>
           <div className="flex items-center justify-between text-sm">
-            <span className="text-emerald-700">단품 소계</span>
-            <span className="font-semibold text-emerald-800">{totalDirectQty}개</span>
+            <span className="text-emerald-700">단품 소계 (예정 / 실적)</span>
+            <span className="font-semibold text-emerald-800">
+              {totalDirectAvailable}개 / <span className={totalDirectQty !== totalDirectAvailable ? 'text-orange-600' : ''}>{totalDirectQty}개</span>
+            </span>
           </div>
           <div className="border-t border-emerald-200 pt-1 mt-1 flex items-center justify-between text-sm">
-            <span className="font-bold text-gray-800">총 출고 수량</span>
-            <span className="font-bold text-gray-900 text-base">{totalShipQty}개</span>
+            <span className="font-bold text-gray-800">총 출고 수량 (예정 / 실적)</span>
+            <span className="font-bold text-gray-900 text-base">
+              {totalMarkingAvailable + totalDirectAvailable}개 / <span className={totalShipQty !== (totalMarkingAvailable + totalDirectAvailable) ? 'text-orange-600' : ''}>{totalShipQty}개</span>
+            </span>
           </div>
         </div>
 

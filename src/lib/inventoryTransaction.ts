@@ -301,15 +301,21 @@ export async function deleteCjTransactions(params: {
 /** system 소스 트랜잭션 삭제 (실적 삭제용) + inventory 역반영 */
 export async function deleteSystemTransactions(params: {
   warehouseId: string;
-  memo: string; // 정확 일치 (eq)
+  memo: string; // 정확 일치 (eq) 또는 LIKE 패턴 (memoLike 사용 시)
+  memoLike?: string; // LIKE 패턴 (예: '%입고확인%작업지시서 2026-03-31%')
 }): Promise<{ deleted: number; error: string | null }> {
   // 1) 삭제 대상 트랜잭션 조회
-  const { data: txToDelete, error: fetchErr } = await supabaseAdmin
+  let query = supabaseAdmin
     .from('inventory_transaction')
     .select('sku_id, tx_type, quantity')
     .eq('source', 'system')
-    .eq('warehouse_id', params.warehouseId)
-    .eq('memo', params.memo);
+    .eq('warehouse_id', params.warehouseId);
+  if (params.memoLike) {
+    query = query.like('memo', params.memoLike);
+  } else {
+    query = query.eq('memo', params.memo);
+  }
+  const { data: txToDelete, error: fetchErr } = await query;
 
   if (fetchErr) {
     return { deleted: 0, error: fetchErr.message };
@@ -321,12 +327,17 @@ export async function deleteSystemTransactions(params: {
   }
 
   // 2) 트랜잭션 삭제
-  const { error } = await supabaseAdmin
+  let delQuery = supabaseAdmin
     .from('inventory_transaction')
     .delete()
     .eq('source', 'system')
-    .eq('warehouse_id', params.warehouseId)
-    .eq('memo', params.memo);
+    .eq('warehouse_id', params.warehouseId);
+  if (params.memoLike) {
+    delQuery = delQuery.like('memo', params.memoLike);
+  } else {
+    delQuery = delQuery.eq('memo', params.memo);
+  }
+  const { error } = await delQuery;
 
   if (error) {
     return { deleted: 0, error: error.message };

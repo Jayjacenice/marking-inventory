@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { supabase } from '../../lib/supabase';
 import { useStaleGuard } from '../../hooks/useStaleGuard';
+import { useLoadingTimeout } from '../../hooks/useLoadingTimeout';
 import { parseBomExcel, parseBerrizBomExcel, type RawBomRow } from '../../lib/excelParser';
 import { Upload, Database, Trash2, AlertTriangle, CheckCircle, FileSpreadsheet, Search } from 'lucide-react';
 
@@ -26,6 +27,7 @@ export default function BOMManage() {
   const [isDragging, setIsDragging] = useState(false);
   const [searchText, setSearchText] = useState('');
   const fileInputRef = useRef<HTMLInputElement>(null);
+  useLoadingTimeout(loading, setLoading);
 
   useEffect(() => {
     loadBoms();

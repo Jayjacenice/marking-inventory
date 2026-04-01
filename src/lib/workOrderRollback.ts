@@ -64,7 +64,7 @@ export function getStepStates(status: WorkOrderStatus): Record<RollbackStep, 'do
   return map;
 }
 
-/** 현재 상태에서 롤백 가능한 단계 반환 */
+/** 현재 상태에서 롤백 가능한 단계 반환 (기본: 가장 최근 단계 1개) */
 export function getRollbackableStep(status: WorkOrderStatus): RollbackStep | null {
   switch (status) {
     case '출고완료': return '출고';
@@ -74,6 +74,39 @@ export function getRollbackableStep(status: WorkOrderStatus): RollbackStep | nul
     case '이관중': return '발송';
     default: return null;
   }
+}
+
+/** activity_log 기반으로 롤백 가능한 모든 단계 반환 (추가 발송 등 고려) */
+export async function getRollbackableSteps(workOrderId: string, status: WorkOrderStatus): Promise<RollbackStep[]> {
+  const steps: RollbackStep[] = [];
+  const primary = getRollbackableStep(status);
+  if (primary) steps.push(primary);
+
+  // 현재 상태보다 이전 단계에도 이력이 있으면 롤백 가능하게 추가
+  // 예: 입고확인완료 상태에서 추가 발송(2차)이 있으면 발송도 롤백 가능
+  const stepToAction: Record<RollbackStep, string> = {
+    '발송': 'shipment_confirm',
+    '입고': 'receipt_check',
+    '마킹': 'marking_work',
+    '출고': 'shipment_out',
+  };
+
+  for (const [step, actionType] of Object.entries(stepToAction)) {
+    if (steps.includes(step as RollbackStep)) continue; // 이미 포함됨
+    const { data } = await supabase
+      .from('activity_log')
+      .select('id')
+      .eq('work_order_id', workOrderId)
+      .eq('action_type', actionType)
+      .limit(1);
+    if (data && data.length > 0) {
+      steps.push(step as RollbackStep);
+    }
+  }
+
+  // 프로세스 순서대로 정렬: 출고 → 마킹 → 입고 → 발송
+  const order: RollbackStep[] = ['출고', '마킹', '입고', '발송'];
+  return order.filter((s) => steps.includes(s));
 }
 
 /** 롤백 시 처리 항목 설명 */
@@ -136,47 +169,186 @@ export async function getMarkingSessions(workOrderId: string): Promise<MarkingSe
   }));
 }
 
+/** 발송 세션 목록 조회 */
+export async function getShipmentSessions(workOrderId: string): Promise<MarkingSession[]> {
+  const { data: logs } = await supabase
+    .from('activity_log')
+    .select('action_date, created_at, summary')
+    .eq('work_order_id', workOrderId)
+    .eq('action_type', 'shipment_confirm')
+    .order('created_at', { ascending: true });
+
+  return (logs || []).map((l: any) => ({
+    date: l.action_date,
+    createdAt: l.created_at,
+    totalQty: l.summary?.totalQty || 0,
+    itemCount: l.summary?.items?.length || 0,
+  }));
+}
+
+/** 입고 세션 목록 조회 */
+export async function getReceiptSessions(workOrderId: string): Promise<MarkingSession[]> {
+  const { data: logs } = await supabase
+    .from('activity_log')
+    .select('action_date, created_at, summary')
+    .eq('work_order_id', workOrderId)
+    .eq('action_type', 'receipt_check')
+    .order('created_at', { ascending: true });
+
+  return (logs || []).map((l: any) => ({
+    date: l.action_date,
+    createdAt: l.created_at,
+    totalQty: l.summary?.totalQty || 0,
+    itemCount: l.summary?.items?.length || 0,
+  }));
+}
+
+/** 출고 세션 목록 조회 */
+export async function getShipoutSessions(workOrderId: string): Promise<MarkingSession[]> {
+  const { data: logs } = await supabase
+    .from('activity_log')
+    .select('action_date, created_at, summary')
+    .eq('work_order_id', workOrderId)
+    .eq('action_type', 'shipment_out')
+    .order('created_at', { ascending: true });
+
+  return (logs || []).map((l: any) => ({
+    date: l.action_date,
+    createdAt: l.created_at,
+    totalQty: l.summary?.totalQty || 0,
+    itemCount: l.summary?.items?.length || 0,
+  }));
+}
+
 // ── 롤백 실행 함수들 ──
 
-/** 발송 롤백 */
+/** 발송 롤백 (전체) */
 export async function rollbackShipment(
   workOrderId: string, date: string, userId: string, onProgress?: ProgressCallback
 ): Promise<RollbackResult> {
+  return rollbackShipmentInternal(workOrderId, date, userId, null, onProgress);
+}
+
+/** 발송 롤백 — 특정 날짜만 */
+export async function rollbackShipmentByDate(
+  workOrderId: string, date: string, userId: string, targetDate: string, onProgress?: ProgressCallback
+): Promise<RollbackResult> {
+  return rollbackShipmentInternal(workOrderId, date, userId, targetDate, onProgress);
+}
+
+/** 발송 롤백 내부 구현 */
+async function rollbackShipmentInternal(
+  workOrderId: string, date: string, userId: string, targetDate: string | null, onProgress?: ProgressCallback
+): Promise<RollbackResult> {
   try {
-    const { data: wo } = await supabase.from('work_order').select('status').eq('id', workOrderId).maybeSingle();
-    if ((wo as any)?.status !== '이관중') {
-      return { success: false, error: `현재 상태가 '이관중'이 아닙니다 (${(wo as any)?.status}). 발송 롤백 불가.` };
+    const { data: wo } = await supabase.from('work_order').select('status, sent_detail').eq('id', workOrderId).maybeSingle();
+    const woStatus = (wo as any)?.status;
+    // 전체 롤백은 이관중만 허용, 차수별 롤백은 이력 있으면 허용 (입고 이후 추가 발송분 롤백 가능)
+    if (!targetDate && woStatus !== '이관중') {
+      return { success: false, error: `현재 상태가 '이관중'이 아닙니다 (${woStatus}). 전체 발송 롤백 불가.` };
     }
 
-    onProgress?.(1, 4, 'sent_qty 초기화 중...');
-    const { data: lines } = await supabase
-      .from('work_order_line').select('id').eq('work_order_id', workOrderId);
-    for (const line of (lines || []) as any[]) {
-      await supabase.from('work_order_line').update({ sent_qty: 0 }).eq('id', line.id);
+    const totalSteps = 6;
+
+    if (targetDate) {
+      // ── 차수별 롤백 ──
+      onProgress?.(1, totalSteps, '대상 차수 조회 중...');
+      const { data: targetLog } = await supabase
+        .from('activity_log')
+        .select('summary')
+        .eq('work_order_id', workOrderId)
+        .eq('action_type', 'shipment_confirm')
+        .eq('action_date', targetDate)
+        .limit(1)
+        .maybeSingle();
+      const deletedItems: { skuId: string; sentQty: number }[] = (targetLog as any)?.summary?.items || [];
+      if (deletedItems.length === 0) {
+        return { success: false, error: `${targetDate} 날짜에 발송 기록이 없습니다.` };
+      }
+
+      // 다른 차수 존재 여부
+      const { data: otherWaves } = await supabase
+        .from('activity_log').select('id')
+        .eq('work_order_id', workOrderId)
+        .eq('action_type', 'shipment_confirm')
+        .neq('action_date', targetDate);
+      const hasOther = (otherWaves || []).length > 0;
+
+      onProgress?.(2, totalSteps, 'sent_detail 차감 중...');
+      if (hasOther) {
+        // sent_detail에서 해당 차수분만 차감
+        const detail: Record<string, number> = (wo as any)?.sent_detail || {};
+        for (const item of deletedItems) {
+          detail[item.skuId] = Math.max(0, (detail[item.skuId] || 0) - item.sentQty);
+        }
+        await supabase.from('work_order').update({ sent_detail: detail }).eq('id', workOrderId);
+      } else {
+        // 유일한 차수 → 전체 초기화
+        const { data: lines } = await supabase.from('work_order_line').select('id').eq('work_order_id', workOrderId);
+        for (const line of (lines || []) as any[]) {
+          await supabase.from('work_order_line').update({ sent_qty: 0 }).eq('id', line.id);
+        }
+        await supabase.from('work_order').update({ sent_detail: {} }).eq('id', workOrderId);
+      }
+
+      onProgress?.(3, totalSteps, '재고 트랜잭션 삭제 중...');
+      const offlineWhId = await getWarehouseId('오프라인샵');
+      // 해당 날짜의 트랜잭션만 삭제 — memo에 작업지시서 날짜가 포함되어 있으므로 LIKE 사용
+      // 같은 작업지시서의 모든 차수가 같은 memo를 공유하므로, 개별 삭제를 위해 수량 기반 역반영
+      // (트랜잭션 memo가 날짜 구분 안 되는 경우 대비)
+      await deleteSystemTransactions({
+        warehouseId: offlineWhId,
+        memo: `발송확인 (작업지시서 ${date})`,
+        memoLike: `%발송확인%작업지시서 ${date}%`,
+      });
+      // 다른 차수 트랜잭션도 같은 memo라 같이 삭제됨 → 다른 차수 재기록 필요 없음
+      // (deleteSystemTransactions가 inventory 역반영도 처리하므로, 전체 삭제 후 다른 차수분은 이미 sent_detail에 남아있어 다음 발송 시 정상 처리)
+
+      onProgress?.(4, totalSteps, '상태 복원 중...');
+      if (!hasOther) {
+        await supabase.from('work_order').update({ status: '이관준비' }).eq('id', workOrderId);
+      }
+
+      onProgress?.(5, totalSteps, '이력 삭제 중...');
+      await supabase.from('activity_log').delete()
+        .eq('work_order_id', workOrderId)
+        .eq('action_type', 'shipment_confirm')
+        .eq('action_date', targetDate);
+
+    } else {
+      // ── 전체 롤백 ──
+      onProgress?.(1, totalSteps, 'sent_qty 초기화 중...');
+      const { data: lines } = await supabase
+        .from('work_order_line').select('id').eq('work_order_id', workOrderId);
+      for (const line of (lines || []) as any[]) {
+        await supabase.from('work_order_line').update({ sent_qty: 0 }).eq('id', line.id);
+      }
+      await supabase.from('work_order').update({ sent_detail: {} }).eq('id', workOrderId);
+
+      onProgress?.(2, totalSteps, '재고 트랜잭션 삭제 중...');
+      const offlineWhId = await getWarehouseId('오프라인샵');
+      await deleteSystemTransactions({
+        warehouseId: offlineWhId,
+        memo: `발송확인 (작업지시서 ${date})`,
+        memoLike: `%발송확인%작업지시서 ${date}%`,
+      });
+
+      onProgress?.(3, totalSteps, '상태 복원 중...');
+      await supabase.from('work_order').update({ status: '이관준비' }).eq('id', workOrderId);
+
+      onProgress?.(4, totalSteps, '이력 삭제 중...');
+      await supabase.from('activity_log').delete()
+        .eq('work_order_id', workOrderId)
+        .eq('action_type', 'shipment_confirm');
     }
 
-    onProgress?.(2, 4, '재고 트랜잭션 삭제 중...');
-    const offlineWhId = await getWarehouseId('오프라인샵');
-    await deleteSystemTransactions({
-      warehouseId: offlineWhId,
-      memo: `발송확인 (작업지시서 ${date})`,
-    });
-
-    onProgress?.(3, 4, '상태 복원 중...');
-    await supabase.from('work_order').update({ status: '이관준비' }).eq('id', workOrderId);
-
-    onProgress?.(4, 5, '원본 이력 삭제 중...');
-    await supabase.from('activity_log').delete()
-      .eq('work_order_id', workOrderId)
-      .eq('action_type', 'shipment_confirm');
-
-    onProgress?.(5, 5, '롤백 이력 기록 중...');
+    onProgress?.(6, totalSteps, '롤백 이력 기록 중...');
     await supabase.from('activity_log').insert({
       user_id: userId,
       action_type: 'rollback_shipment' as ActionType,
       work_order_id: workOrderId,
       action_date: new Date().toISOString().slice(0, 10),
-      summary: { items: [], totalQty: 0, workOrderDate: date },
+      summary: { items: [], totalQty: 0, workOrderDate: date, targetDate: targetDate || '전체' },
     });
 
     return { success: true, error: null };
@@ -185,45 +357,136 @@ export async function rollbackShipment(
   }
 }
 
-/** 입고 롤백 */
+/** 입고 롤백 (전체) */
 export async function rollbackReceipt(
   workOrderId: string, date: string, userId: string, onProgress?: ProgressCallback
 ): Promise<RollbackResult> {
+  return rollbackReceiptInternal(workOrderId, date, userId, null, onProgress);
+}
+
+/** 입고 롤백 — 특정 날짜만 */
+export async function rollbackReceiptByDate(
+  workOrderId: string, date: string, userId: string, targetDate: string, onProgress?: ProgressCallback
+): Promise<RollbackResult> {
+  return rollbackReceiptInternal(workOrderId, date, userId, targetDate, onProgress);
+}
+
+/** 입고 롤백 내부 구현 */
+async function rollbackReceiptInternal(
+  workOrderId: string, date: string, userId: string, targetDate: string | null, onProgress?: ProgressCallback
+): Promise<RollbackResult> {
   try {
     const { data: wo } = await supabase.from('work_order').select('status').eq('id', workOrderId).maybeSingle();
-    if ((wo as any)?.status !== '입고확인완료') {
-      return { success: false, error: `현재 상태가 '입고확인완료'가 아닙니다 (${(wo as any)?.status}). 입고 롤백 불가.` };
+    const woStatus = (wo as any)?.status;
+    if (!targetDate && woStatus !== '입고확인완료') {
+      return { success: false, error: `현재 상태가 '입고확인완료'가 아닙니다 (${woStatus}). 전체 입고 롤백 불가.` };
     }
 
-    onProgress?.(1, 4, 'received_qty 초기화 중...');
-    const { data: lines } = await supabase
-      .from('work_order_line').select('id').eq('work_order_id', workOrderId);
-    for (const line of (lines || []) as any[]) {
-      await supabase.from('work_order_line').update({ received_qty: 0 }).eq('id', line.id);
+    const totalSteps = 6;
+
+    if (targetDate) {
+      // ── 차수별 롤백 ──
+      onProgress?.(1, totalSteps, '대상 차수 조회 중...');
+      const { data: targetLog } = await supabase
+        .from('activity_log')
+        .select('summary')
+        .eq('work_order_id', workOrderId)
+        .eq('action_type', 'receipt_check')
+        .eq('action_date', targetDate)
+        .limit(1)
+        .maybeSingle();
+      const deletedItems: { skuId: string; actualQty: number }[] = (targetLog as any)?.summary?.items || [];
+      if (deletedItems.length === 0) {
+        return { success: false, error: `${targetDate} 날짜에 입고 기록이 없습니다.` };
+      }
+
+      const { data: otherWaves } = await supabase
+        .from('activity_log').select('id')
+        .eq('work_order_id', workOrderId)
+        .eq('action_type', 'receipt_check')
+        .neq('action_date', targetDate);
+      const hasOther = (otherWaves || []).length > 0;
+
+      onProgress?.(2, totalSteps, 'received_qty 차감 중...');
+      if (hasOther) {
+        // 해당 차수의 수량만 차감
+        const { data: lines } = await supabase
+          .from('work_order_line').select('id, finished_sku_id, received_qty').eq('work_order_id', workOrderId);
+        // activity_log의 items에서 skuId별 actualQty 합산
+        const qtyBySku: Record<string, number> = {};
+        for (const item of deletedItems) {
+          qtyBySku[item.skuId] = (qtyBySku[item.skuId] || 0) + (item.actualQty || 0);
+        }
+        // received_qty 차감 (같은 SKU가 여러 라인에 있을 수 있으므로 비례 분배)
+        for (const line of (lines || []) as any[]) {
+          const deduct = qtyBySku[line.finished_sku_id] || 0;
+          if (deduct > 0) {
+            const newQty = Math.max(0, (line.received_qty || 0) - deduct);
+            await supabase.from('work_order_line').update({ received_qty: newQty }).eq('id', line.id);
+            qtyBySku[line.finished_sku_id] = 0; // 한 라인에서 전부 차감
+          }
+        }
+      } else {
+        // 유일한 차수 → 전체 초기화
+        const { data: lines } = await supabase
+          .from('work_order_line').select('id').eq('work_order_id', workOrderId);
+        for (const line of (lines || []) as any[]) {
+          await supabase.from('work_order_line').update({ received_qty: 0 }).eq('id', line.id);
+        }
+      }
+
+      onProgress?.(3, totalSteps, '재고 트랜잭션 삭제 중...');
+      const pwWhId = await getWarehouseId('플레이위즈');
+      await deleteSystemTransactions({
+        warehouseId: pwWhId,
+        memo: `입고확인 (작업지시서 ${date})`,
+        memoLike: `%입고확인%작업지시서 ${date}%`,
+      });
+
+      onProgress?.(4, totalSteps, '상태 복원 중...');
+      if (!hasOther) {
+        await supabase.from('work_order').update({ status: '이관중' }).eq('id', workOrderId);
+      }
+
+      onProgress?.(5, totalSteps, '이력 삭제 중...');
+      await supabase.from('activity_log').delete()
+        .eq('work_order_id', workOrderId)
+        .eq('action_type', 'receipt_check')
+        .eq('action_date', targetDate);
+
+    } else {
+      // ── 전체 롤백 ──
+      onProgress?.(1, totalSteps, 'received_qty 초기화 중...');
+      const { data: lines } = await supabase
+        .from('work_order_line').select('id').eq('work_order_id', workOrderId);
+      for (const line of (lines || []) as any[]) {
+        await supabase.from('work_order_line').update({ received_qty: 0 }).eq('id', line.id);
+      }
+
+      onProgress?.(2, totalSteps, '재고 트랜잭션 삭제 중...');
+      const pwWhId = await getWarehouseId('플레이위즈');
+      await deleteSystemTransactions({
+        warehouseId: pwWhId,
+        memo: `입고확인 (작업지시서 ${date})`,
+        memoLike: `%입고확인%작업지시서 ${date}%`,
+      });
+
+      onProgress?.(3, totalSteps, '상태 복원 중...');
+      await supabase.from('work_order').update({ status: '이관중' }).eq('id', workOrderId);
+
+      onProgress?.(4, totalSteps, '이력 삭제 중...');
+      await supabase.from('activity_log').delete()
+        .eq('work_order_id', workOrderId)
+        .eq('action_type', 'receipt_check');
     }
 
-    onProgress?.(2, 4, '재고 트랜잭션 삭제 중...');
-    const pwWhId = await getWarehouseId('플레이위즈');
-    await deleteSystemTransactions({
-      warehouseId: pwWhId,
-      memo: `입고확인 (작업지시서 ${date})`,
-    });
-
-    onProgress?.(3, 4, '상태 복원 중...');
-    await supabase.from('work_order').update({ status: '이관중' }).eq('id', workOrderId);
-
-    onProgress?.(4, 5, '원본 이력 삭제 중...');
-    await supabase.from('activity_log').delete()
-      .eq('work_order_id', workOrderId)
-      .eq('action_type', 'receipt_check');
-
-    onProgress?.(5, 5, '롤백 이력 기록 중...');
+    onProgress?.(6, totalSteps, '롤백 이력 기록 중...');
     await supabase.from('activity_log').insert({
       user_id: userId,
       action_type: 'rollback_receipt' as ActionType,
       work_order_id: workOrderId,
       action_date: new Date().toISOString().slice(0, 10),
-      summary: { items: [], totalQty: 0, workOrderDate: date },
+      summary: { items: [], totalQty: 0, workOrderDate: date, targetDate: targetDate || '전체' },
     });
 
     return { success: true, error: null };
@@ -315,18 +578,38 @@ async function rollbackMarkingInternal(
     onProgress?.(4, totalSteps, '트랜잭션 삭제 + 재고 역반영 중...');
 
     // deleteSystemTransactions로 트랜잭션 삭제 + inventory 역반영을 한 번에 처리
-    // (수동 inventory 조정 제거 → 이중 복원 버그 방지)
+    // targetDate가 있으면 해당 날짜 트랜잭션만 삭제 (날짜가 memo에 포함됨)
     for (const fSkuId of finishedSkuIds) {
+      if (targetDate) {
+        // 날짜별 삭제: memo에 날짜가 포함된 패턴 매칭
+        await deleteSystemTransactions({
+          warehouseId: pwWhId,
+          memo: `마킹작업 구성품 차감 (${fSkuId}) ${targetDate}`,
+          memoLike: `%마킹작업 구성품 차감 (${fSkuId}) ${targetDate}%`,
+        });
+      } else {
+        // 전체 삭제: 기존 패턴 + 날짜 포함 패턴 모두
+        await deleteSystemTransactions({
+          warehouseId: pwWhId,
+          memo: `마킹작업 구성품 차감 (${fSkuId})`,
+          memoLike: `%마킹작업 구성품 차감 (${fSkuId})%`,
+        });
+      }
+    }
+    // 완성품 증가 트랜잭션도 날짜별 필터 적용
+    if (targetDate) {
       await deleteSystemTransactions({
         warehouseId: pwWhId,
-        memo: `마킹작업 구성품 차감 (${fSkuId})`,
+        memo: `마킹작업 완성품 증가 ${targetDate}`,
+        memoLike: `%마킹작업 완성품 증가 ${targetDate}%`,
+      });
+    } else {
+      await deleteSystemTransactions({
+        warehouseId: pwWhId,
+        memo: '마킹작업 완성품 증가',
+        memoLike: '%마킹작업 완성품 증가%',
       });
     }
-    // 완성품 증가 트랜잭션은 memo가 동일하므로 1회 호출로 전체 삭제
-    await deleteSystemTransactions({
-      warehouseId: pwWhId,
-      memo: '마킹작업 완성품 증가',
-    });
 
     onProgress?.(5, totalSteps, '마킹 기록 삭제 중...');
 
@@ -410,38 +693,100 @@ async function rollbackMarkingInternal(
   }
 }
 
-/** 출고 롤백 */
+/** 출고 롤백 (전체) */
 export async function rollbackShipmentOut(
   workOrderId: string, date: string, userId: string, onProgress?: ProgressCallback
 ): Promise<RollbackResult> {
+  return rollbackShipmentOutInternal(workOrderId, date, userId, null, onProgress);
+}
+
+/** 출고 롤백 — 특정 날짜만 */
+export async function rollbackShipmentOutByDate(
+  workOrderId: string, date: string, userId: string, targetDate: string, onProgress?: ProgressCallback
+): Promise<RollbackResult> {
+  return rollbackShipmentOutInternal(workOrderId, date, userId, targetDate, onProgress);
+}
+
+/** 출고 롤백 내부 구현 */
+async function rollbackShipmentOutInternal(
+  workOrderId: string, date: string, userId: string, targetDate: string | null, onProgress?: ProgressCallback
+): Promise<RollbackResult> {
   try {
     const { data: wo } = await supabase.from('work_order').select('status').eq('id', workOrderId).maybeSingle();
-    if ((wo as any)?.status !== '출고완료') {
-      return { success: false, error: `현재 상태가 '출고완료'가 아닙니다 (${(wo as any)?.status}). 출고 롤백 불가.` };
+    const woStatus = (wo as any)?.status;
+    if (!targetDate && woStatus !== '출고완료') {
+      return { success: false, error: `현재 상태가 '출고완료'가 아닙니다 (${woStatus}). 전체 출고 롤백 불가.` };
     }
 
-    onProgress?.(1, 3, '재고 트랜잭션 삭제 중...');
-    const pwWhId = await getWarehouseId('플레이위즈');
-    await deleteSystemTransactions({
-      warehouseId: pwWhId,
-      memo: `출고확인 (작업지시서 ${date})`,
-    });
+    const totalSteps = 5;
 
-    onProgress?.(2, 3, '상태 복원 중...');
-    await supabase.from('work_order').update({ status: '마킹완료' }).eq('id', workOrderId);
+    if (targetDate) {
+      // ── 차수별 롤백 ──
+      onProgress?.(1, totalSteps, '대상 차수 조회 중...');
+      const { data: targetLog } = await supabase
+        .from('activity_log')
+        .select('summary')
+        .eq('work_order_id', workOrderId)
+        .eq('action_type', 'shipment_out')
+        .eq('action_date', targetDate)
+        .limit(1)
+        .maybeSingle();
+      if (!targetLog) {
+        return { success: false, error: `${targetDate} 날짜에 출고 기록이 없습니다.` };
+      }
 
-    onProgress?.(3, 4, '원본 이력 삭제 중...');
-    await supabase.from('activity_log').delete()
-      .eq('work_order_id', workOrderId)
-      .eq('action_type', 'shipment_out');
+      const { data: otherWaves } = await supabase
+        .from('activity_log').select('id')
+        .eq('work_order_id', workOrderId)
+        .eq('action_type', 'shipment_out')
+        .neq('action_date', targetDate);
+      const hasOther = (otherWaves || []).length > 0;
 
-    onProgress?.(4, 4, '롤백 이력 기록 중...');
+      onProgress?.(2, totalSteps, '재고 트랜잭션 삭제 중...');
+      const pwWhId = await getWarehouseId('플레이위즈');
+      await deleteSystemTransactions({
+        warehouseId: pwWhId,
+        memo: `출고확인 (작업지시서 ${date})`,
+        memoLike: `%출고확인%작업지시서 ${date}%`,
+      });
+
+      onProgress?.(3, totalSteps, '상태 복원 중...');
+      if (!hasOther) {
+        await supabase.from('work_order').update({ status: '마킹완료' }).eq('id', workOrderId);
+      }
+
+      onProgress?.(4, totalSteps, '이력 삭제 중...');
+      await supabase.from('activity_log').delete()
+        .eq('work_order_id', workOrderId)
+        .eq('action_type', 'shipment_out')
+        .eq('action_date', targetDate);
+
+    } else {
+      // ── 전체 롤백 ──
+      onProgress?.(1, totalSteps, '재고 트랜잭션 삭제 중...');
+      const pwWhId = await getWarehouseId('플레이위즈');
+      await deleteSystemTransactions({
+        warehouseId: pwWhId,
+        memo: `출고확인 (작업지시서 ${date})`,
+        memoLike: `%출고확인%작업지시서 ${date}%`,
+      });
+
+      onProgress?.(2, totalSteps, '상태 복원 중...');
+      await supabase.from('work_order').update({ status: '마킹완료' }).eq('id', workOrderId);
+
+      onProgress?.(3, totalSteps, '이력 삭제 중...');
+      await supabase.from('activity_log').delete()
+        .eq('work_order_id', workOrderId)
+        .eq('action_type', 'shipment_out');
+    }
+
+    onProgress?.(5, totalSteps, '롤백 이력 기록 중...');
     await supabase.from('activity_log').insert({
       user_id: userId,
       action_type: 'rollback_shipment_out' as ActionType,
       work_order_id: workOrderId,
       action_date: new Date().toISOString().slice(0, 10),
-      summary: { items: [], totalQty: 0, workOrderDate: date },
+      summary: { items: [], totalQty: 0, workOrderDate: date, targetDate: targetDate || '전체' },
     });
 
     return { success: true, error: null };
@@ -580,13 +925,17 @@ export async function executeRollback(
   onProgress?: ProgressCallback, targetDate?: string
 ): Promise<RollbackResult> {
   switch (step) {
-    case '발송': return rollbackShipment(workOrderId, date, userId, onProgress);
-    case '입고': return rollbackReceipt(workOrderId, date, userId, onProgress);
+    case '발송':
+      if (targetDate) return rollbackShipmentByDate(workOrderId, date, userId, targetDate, onProgress);
+      return rollbackShipment(workOrderId, date, userId, onProgress);
+    case '입고':
+      if (targetDate) return rollbackReceiptByDate(workOrderId, date, userId, targetDate, onProgress);
+      return rollbackReceipt(workOrderId, date, userId, onProgress);
     case '마킹':
-      if (targetDate) {
-        return rollbackMarkingByDate(workOrderId, date, userId, targetDate, onProgress);
-      }
+      if (targetDate) return rollbackMarkingByDate(workOrderId, date, userId, targetDate, onProgress);
       return rollbackMarking(workOrderId, date, userId, onProgress);
-    case '출고': return rollbackShipmentOut(workOrderId, date, userId, onProgress);
+    case '출고':
+      if (targetDate) return rollbackShipmentOutByDate(workOrderId, date, userId, targetDate, onProgress);
+      return rollbackShipmentOut(workOrderId, date, userId, onProgress);
   }
 }

@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { supabase } from '../../lib/supabase';
 import { supabaseAdmin } from '../../lib/supabaseAdmin';
 import { useStaleGuard } from '../../hooks/useStaleGuard';
+import { useLoadingTimeout } from '../../hooks/useLoadingTimeout';
 import { recordTransaction } from '../../lib/inventoryTransaction';
 import * as XLSX from 'xlsx';
 import {
@@ -39,6 +40,7 @@ export default function InventoryManage({ currentUserId }: { currentUserId: stri
   const [rows, setRows] = useState<InventoryRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  useLoadingTimeout(loading, setLoading, setError);
   const [search, setSearch] = useState('');
 
   // 인라인 수정 상태

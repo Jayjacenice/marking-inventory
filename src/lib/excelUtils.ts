@@ -197,25 +197,39 @@ export function generateTemplate(
 ): void {
   const hasCategory = items.some((i) => i.needsMarking !== undefined);
 
+  // 정렬: 1) 구분 (마킹 예정 → 단순 출고) 2) 상품 구분 (유니폼 UN → 마킹 MK) 3) 상품명 오름차순
+  const sorted = [...items].sort((a, b) => {
+    // 1순위: 마킹 예정 먼저 (needsMarking=true → 0, false → 1, undefined → 2)
+    const catA = a.needsMarking === true ? 0 : a.needsMarking === false ? 1 : 2;
+    const catB = b.needsMarking === true ? 0 : b.needsMarking === false ? 1 : 2;
+    if (catA !== catB) return catA - catB;
+    // 2순위: 유니폼(UN) 먼저, 마킹(MK) 나중
+    const isUniformA = a.skuId.includes('UN-') ? 0 : 1;
+    const isUniformB = b.skuId.includes('UN-') ? 0 : 1;
+    if (isUniformA !== isUniformB) return isUniformA - isUniformB;
+    // 3순위: 상품명 오름차순
+    return a.skuName.localeCompare(b.skuName, 'ko');
+  });
+
   const wsData = hasCategory
     ? [
-        ['SKU ID', 'SKU명', '바코드', '구분', '수량'],
-        ...items.map((item) => [
+        ['구분', 'SKU ID', 'SKU명', '바코드', '수량'],
+        ...sorted.map((item) => [
+          item.needsMarking !== undefined ? (item.needsMarking ? MARKING_LABEL : DIRECT_LABEL) : '',
           item.skuId,
           item.skuName,
           item.barcode ?? '',
-          item.needsMarking !== undefined ? (item.needsMarking ? MARKING_LABEL : DIRECT_LABEL) : '',
           item.qty,
         ]),
       ]
     : [
         ['SKU ID', 'SKU명', '바코드', '수량'],
-        ...items.map((item) => [item.skuId, item.skuName, item.barcode ?? '', item.qty]),
+        ...sorted.map((item) => [item.skuId, item.skuName, item.barcode ?? '', item.qty]),
       ];
 
   const ws = XLSX.utils.aoa_to_sheet(wsData);
   ws['!cols'] = hasCategory
-    ? [{ wch: 20 }, { wch: 30 }, { wch: 16 }, { wch: 12 }, { wch: 10 }]
+    ? [{ wch: 12 }, { wch: 20 }, { wch: 30 }, { wch: 16 }, { wch: 10 }]
     : [{ wch: 20 }, { wch: 30 }, { wch: 16 }, { wch: 10 }];
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, '수량입력');

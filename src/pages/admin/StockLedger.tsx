@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback } from 'react';
 import { supabase } from '../../lib/supabase';
 import { useStaleGuard } from '../../hooks/useStaleGuard';
+import { useLoadingTimeout } from '../../hooks/useLoadingTimeout';
 import { recordTransactionBatch, validateTransactionBatch, deleteCjTransactions, countCjTransactions } from '../../lib/inventoryTransaction';
 import type { ValidationError } from '../../lib/inventoryTransaction';
 import { parseCjShipment, parseCjReceipt, parseCjReturn, detectCjFileType } from '../../lib/cjExcelParser';
@@ -40,6 +41,7 @@ export default function StockLedger() {
   const [rows, setRows] = useState<LedgerRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  useLoadingTimeout(loading, setLoading, setError);
 
   // CJ 엑셀 업로드
   const [uploadType, setUploadType] = useState<TxType | null>(null);

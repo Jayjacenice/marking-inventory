@@ -1,6 +1,7 @@
 import { useState, useCallback } from 'react';
 import { supabase } from '../../lib/supabase';
 import { useStaleGuard } from '../../hooks/useStaleGuard';
+import { useLoadingTimeout } from '../../hooks/useLoadingTimeout';
 import * as XLSX from 'xlsx';
 import { BarChart3, Calendar, Download, Search } from 'lucide-react';
 
@@ -47,6 +48,7 @@ export default function TxHistory() {
   const [warehouses, setWarehouses] = useState<{ id: string; name: string }[]>([]);
   const [rows, setRows] = useState<DailyRow[]>([]);
   const [loading, setLoading] = useState(false);
+  useLoadingTimeout(loading, setLoading);
   const [loaded, setLoaded] = useState(false);
 
   // 창고 로드
