@@ -34,6 +34,7 @@ export default function ReceiptCheck({ currentUser }: { currentUser: AppUser }) 
   const [items, setItems] = useState<ReceiptItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const savingRef = useRef(false); // 이중 제출 방지 (React 상태보다 동기적)
   const [saveProgress, setSaveProgress] = useState<{ current: number; total: number; step: string } | null>(null);
   const [done, setDone] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -199,12 +200,15 @@ export default function ReceiptCheck({ currentUser }: { currentUser: AppUser }) 
       // waveItems가 곧 expectedQty (발송 시 이미 단품으로 전개됨)
       setItems(waveItems.map((item) => {
         const isMarking = item.skuId?.includes('MK') || item.skuName?.includes('마킹') || false;
-        // 1순위: 발송 기록에 저장된 needsMarking (가장 정확)
-        // 2순위: BOM 역추적으로 부모 완제품의 needs_marking
-        // 3순위: isMarking 폴백
+        // BOM 역추적: 구성품이 마킹 라인의 완제품에 속하면 마킹 대상
         const parentFinished = compToFinishedMap[item.skuId];
-        const needsMarking = item.needsMarking
-          ?? (parentFinished ? needsMarkingMap[parentFinished] : undefined)
+        const bomNeedsMarking = parentFinished ? needsMarkingMap[parentFinished] : undefined;
+        // 1순위: BOM 역추적 (구성품→완제품의 needs_marking, 가장 정확)
+        // 2순위: 발송 기록의 needsMarking
+        // 3순위: WOL 직접 매칭
+        // 4순위: isMarking 폴백
+        const needsMarking = bomNeedsMarking
+          ?? item.needsMarking
           ?? needsMarkingMap[item.skuId]
           ?? isMarking;
         return {
@@ -217,6 +221,7 @@ export default function ReceiptCheck({ currentUser }: { currentUser: AppUser }) 
           needsMarking,
         };
       }));
+      // 발송 기록에 있는 아이템은 모두 입고 대상으로 표시 (BOM 역추적 불가해도 실제 발송됨)
     } catch (e: any) {
       if (!isStale()) setError(`입고 데이터 조회 실패: ${e.message || '알 수 없는 오류'}`);
     } finally {
@@ -420,7 +425,8 @@ export default function ReceiptCheck({ currentUser }: { currentUser: AppUser }) 
   };
 
   const handleConfirm = async () => {
-    if (!selectedOrder) return;
+    if (!selectedOrder || savingRef.current) return;
+    savingRef.current = true;
     setSaving(true);
     setSaveProgress(null);
     setError(null);
@@ -459,13 +465,18 @@ export default function ReceiptCheck({ currentUser }: { currentUser: AppUser }) 
       let progressStep = 1;
 
       // ── received_qty 업데이트 (차수별 누적, consume 패턴) ──
-      // 같은 구성품을 여러 finished_sku가 공유할 때 중복 할당 방지
-      const consumeMap: Record<string, number> = {};
+      // 마킹용/단순출고용 풀을 분리하여 같은 유니폼 SKU가 서로 침범하지 않도록 함
+      const consumeMapDirect: Record<string, number> = {};  // 단순출고 (needsMarking=false)
+      const consumeMapMarking: Record<string, number> = {}; // 마킹용 (needsMarking=true)
       for (const item of items) {
-        consumeMap[item.skuId] = (consumeMap[item.skuId] || 0) + item.actualQty;
+        if (item.needsMarking) {
+          consumeMapMarking[item.skuId] = (consumeMapMarking[item.skuId] || 0) + item.actualQty;
+        } else {
+          consumeMapDirect[item.skuId] = (consumeMapDirect[item.skuId] || 0) + item.actualQty;
+        }
       }
 
-      // 라인별 thisWaveQty를 미리 계산 (consumeMap에서 순차 차감)
+      // 라인별 thisWaveQty를 미리 계산 (각 풀에서 순차 차감)
       const lineWaveQtyMap: Record<string, number> = {};
       for (const line of lineList) {
         let thisWaveQty: number;
@@ -474,13 +485,13 @@ export default function ReceiptCheck({ currentUser }: { currentUser: AppUser }) 
           const uniformComp = boms.find((b: any) => !b.component_sku_id?.includes('MK'));
           const comp = uniformComp || boms[0];
           if (comp) {
-            const available = consumeMap[comp.component_sku_id] || 0;
+            const available = consumeMapMarking[comp.component_sku_id] || 0;
             const maxFromComp = Math.floor(available / (comp.quantity || 1));
             const remaining = Math.max(0, (line.ordered_qty || 0) - (line.received_qty || 0));
             thisWaveQty = Math.min(maxFromComp, remaining);
-            // 소비: 사용한 만큼 차감
+            // 소비: 사용한 만큼 마킹 풀에서 차감
             for (const b of boms) {
-              consumeMap[b.component_sku_id] = Math.max(0, (consumeMap[b.component_sku_id] || 0) - thisWaveQty * (b.quantity || 1));
+              consumeMapMarking[b.component_sku_id] = Math.max(0, (consumeMapMarking[b.component_sku_id] || 0) - thisWaveQty * (b.quantity || 1));
             }
           } else {
             // BOM 미등록: 패턴 추정으로 구성품 매칭
@@ -489,24 +500,25 @@ export default function ReceiptCheck({ currentUser }: { currentUser: AppUser }) 
             if (fsku.includes('_')) {
               // composite: 26UN-BS-AW-006_CHW → 유니폼=26UN-BS-AW-006
               const base = fsku.split('_')[0];
-              const available = consumeMap[base] || 0;
+              const available = consumeMapMarking[base] || 0;
               thisWaveQty = Math.min(available, remaining);
-              consumeMap[base] = Math.max(0, (consumeMap[base] || 0) - thisWaveQty);
+              consumeMapMarking[base] = Math.max(0, (consumeMapMarking[base] || 0) - thisWaveQty);
               // 마킹 구성품도 차감
               const mk = base.replace('26UN-', '26MK-');
-              consumeMap[mk] = Math.max(0, (consumeMap[mk] || 0) - thisWaveQty);
+              consumeMapMarking[mk] = Math.max(0, (consumeMapMarking[mk] || 0) - thisWaveQty);
             } else if (fsku.startsWith('26MK-')) {
               // 마킹키트 단독 라인: finished_sku_id 자체가 구성품
-              const available = consumeMap[fsku] || 0;
+              const available = consumeMapMarking[fsku] || 0;
               thisWaveQty = Math.min(available, remaining);
-              consumeMap[fsku] = Math.max(0, available - thisWaveQty);
+              consumeMapMarking[fsku] = Math.max(0, available - thisWaveQty);
             } else {
               thisWaveQty = 0;
             }
           }
         } else {
-          thisWaveQty = consumeMap[line.finished_sku_id] ?? 0;
-          consumeMap[line.finished_sku_id] = Math.max(0, (consumeMap[line.finished_sku_id] || 0) - thisWaveQty);
+          // 단순출고 라인: 단순출고 풀에서만 소비
+          thisWaveQty = consumeMapDirect[line.finished_sku_id] ?? 0;
+          consumeMapDirect[line.finished_sku_id] = Math.max(0, (consumeMapDirect[line.finished_sku_id] || 0) - thisWaveQty);
         }
         lineWaveQtyMap[line.id] = thisWaveQty;
       }
@@ -614,6 +626,7 @@ export default function ReceiptCheck({ currentUser }: { currentUser: AppUser }) 
     } catch (e: any) {
       setError(`입고 확인 처리 실패: ${e.message || '알 수 없는 오류'}. 잠시 후 다시 시도해주세요.`);
     } finally {
+      savingRef.current = false;
       setSaving(false);
       setSaveProgress(null);
     }
