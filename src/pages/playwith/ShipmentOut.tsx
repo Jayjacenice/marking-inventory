@@ -43,9 +43,12 @@ export default function ShipmentOut({ currentUser }: { currentUser: AppUser }) {
   const [xlsxError, setXlsxError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // 입고 차수 필터
+  // 단품: 입고 차수 필터
   const [receiptWaves, setReceiptWaves] = useState<{ wave: number; date: string; totalQty: number }[]>([]);
   const [selectedWave, setSelectedWave] = useState<number | null>(null); // null = 전체
+  // 마킹: 작업일 필터
+  const [markingSessions, setMarkingSessions] = useState<{ date: string; totalQty: number }[]>([]);
+  const [selectedMarkingDate, setSelectedMarkingDate] = useState<string | null>(null); // null = 전체
 
   // 이력 조회
   const today = new Date().toISOString().split('T')[0];
@@ -116,7 +119,7 @@ export default function ShipmentOut({ currentUser }: { currentUser: AppUser }) {
       const warehouseId = (warehouseResult.data as any)?.id;
 
       // 2단계: inventory + 이전 출고 이력 + 발송 이력 + 입고 이력 병렬 조회
-      const [inventoryResult, outLogResult, shipLogResult, recLogResult] = await Promise.all([
+      const [inventoryResult, outLogResult, shipLogResult, recLogResult, markingLogResult] = await Promise.all([
         supabase
           .from('inventory')
           .select('sku_id, quantity, needs_marking')
@@ -138,17 +141,35 @@ export default function ShipmentOut({ currentUser }: { currentUser: AppUser }) {
           .eq('work_order_id', wo.id)
           .eq('action_type', 'receipt_check')
           .order('created_at', { ascending: true }),
+        // 마킹 세션 목록
+        supabase
+          .from('activity_log')
+          .select('action_date, summary')
+          .eq('work_order_id', wo.id)
+          .eq('action_type', 'marking_work')
+          .order('created_at', { ascending: true }),
       ]);
       if (inventoryResult.error) throw inventoryResult.error;
       if (isStale()) return;
 
-      // 입고 차수 목록 구성
+      // 입고 차수 목록 (단품 필터용)
       const waves = ((recLogResult.data || []) as any[]).map((l: any) => ({
         wave: l.summary?.wave || 1,
         date: l.action_date,
         totalQty: (l.summary?.items || []).reduce((s: number, i: any) => s + (i.actualQty || 0), 0),
       }));
       setReceiptWaves(waves);
+
+      // 마킹 세션 목록 (마킹 완성품 필터용)
+      const mSessions: { date: string; totalQty: number }[] = [];
+      for (const l of ((markingLogResult.data || []) as any[])) {
+        const d = l.action_date;
+        const q = l.summary?.totalQty || (l.summary?.items || []).reduce((s: number, i: any) => s + (i.completedQty || 0), 0);
+        const existing = mSessions.find((s) => s.date === d);
+        if (existing) existing.totalQty += q;
+        else mSessions.push({ date: d, totalQty: q });
+      }
+      setMarkingSessions(mSessions);
 
       // needs_marking별 분리 재고맵
       const invDirect: Record<string, number> = {};   // needs_marking=false (단품)
@@ -187,21 +208,7 @@ export default function ShipmentOut({ currentUser }: { currentUser: AppUser }) {
         }
       }
 
-      // 입고 차수 필터링: 선택된 차수의 발송 이력에서 SKU 필터
-      let waveFilter: Record<string, { qty: number; needsMarking: boolean }> | null = null;
-      if (selectedWave !== null) {
-        // 선택된 차수에 해당하는 발송 이력 찾기 (wave 번호로 매칭)
-        const targetShipLog = ((shipLogResult.data || []) as any[])
-          .find((l: any) => l.summary?.wave === selectedWave);
-        if (targetShipLog) {
-          waveFilter = {};
-          for (const item of (targetShipLog.summary?.items || []) as any[]) {
-            waveFilter[item.skuId] = { qty: item.sentQty || 0, needsMarking: item.needsMarking ?? false };
-          }
-        }
-      }
-
-      // 4. 출고 가능 수량 집계
+      // 4. 출고 가능 수량 집계 — 단품(입고 차수 필터) + 마킹(작업일 필터) 분리
       const itemMap: Record<string, ShipmentOutItem> = {};
 
       // SKU 이름 조회용 맵
@@ -213,53 +220,63 @@ export default function ShipmentOut({ currentUser }: { currentUser: AppUser }) {
         };
       }
 
-      if (waveFilter) {
-        // ── 차수별 보기: 해당 차수의 발송 SKU만 표시 ──
-        const waveSkuIds = Object.keys(waveFilter);
-        const missingNameSkus = waveSkuIds.filter(s => !skuNameMap[s]);
-        if (missingNameSkus.length > 0) {
-          const { data: skuInfos } = await supabase.from('sku').select('sku_id, sku_name, barcode').in('sku_id', missingNameSkus);
-          for (const s of (skuInfos || []) as any[]) skuNameMap[s.sku_id] = { name: s.sku_name, barcode: s.barcode };
-        }
-        for (const [skuId, { qty, needsMarking }] of Object.entries(waveFilter)) {
-          if (qty <= 0) continue;
-          // 재고 확인 (needs_marking별)
-          const invQty = needsMarking ? (invDirect[skuId] || 0) : (invDirect[skuId] || 0);
-          const info = skuNameMap[skuId];
-          itemMap[skuId] = {
-            finishedSkuId: skuId,
-            skuName: info?.name || skuId,
-            barcode: info?.barcode || null,
-            availableQty: qty,
-            shipQty: 0,
-            inventoryQty: invQty,
-            isShortage: false,
-            needsMarking,
-          };
+      // ── A. 단품: 입고 차수 필터 ──
+      if (selectedWave !== null) {
+        // 특정 차수의 발송 이력에서 단품(needsMarking=false)만 추출
+        const targetShipLog = ((shipLogResult.data || []) as any[])
+          .find((l: any) => l.summary?.wave === selectedWave);
+        if (targetShipLog) {
+          for (const item of (targetShipLog.summary?.items || []) as any[]) {
+            if (item.needsMarking !== false || !item.skuId || !item.sentQty) continue;
+            const info = skuNameMap[item.skuId];
+            itemMap[item.skuId] = {
+              finishedSkuId: item.skuId, skuName: info?.name || item.skuId, barcode: info?.barcode || null,
+              availableQty: item.sentQty, shipQty: 0, inventoryQty: invDirect[item.skuId] || 0,
+              isShortage: false, needsMarking: false,
+            };
+          }
         }
       } else {
-        // ── 전체 보기: 기존 로직 ──
-        // A. 단품(needs_marking=false): invDirect에서 재고 > 0인 SKU
-        const directSkuIds = Object.entries(invDirect).filter(([, qty]) => qty > 0).map(([skuId]) => skuId);
-        // B. 마킹 완성품: 완제품 패턴(26UN-*_*) 재고
-        const finishedSkuIds = Object.keys(inventoryMap)
-          .filter(skuId => (inventoryMap[skuId] || 0) > 0 && skuId.startsWith('26UN-') && skuId.includes('_'));
-
-        const allShipSkuIds = [...new Set([...directSkuIds, ...finishedSkuIds])];
-        const missingNameSkus = allShipSkuIds.filter(s => !skuNameMap[s]);
-        if (missingNameSkus.length > 0) {
-          const { data: skuInfos } = await supabase.from('sku').select('sku_id, sku_name, barcode').in('sku_id', missingNameSkus);
-          for (const s of (skuInfos || []) as any[]) skuNameMap[s.sku_id] = { name: s.sku_name, barcode: s.barcode };
-        }
-
-        for (const skuId of directSkuIds) {
-          const qty = invDirect[skuId];
-          if (skuId.startsWith('26UN-') && skuId.includes('_')) continue;
+        // 전체: needs_marking=false 재고 기준
+        for (const [skuId, qty] of Object.entries(invDirect)) {
+          if (qty <= 0 || (skuId.startsWith('26UN-') && skuId.includes('_'))) continue;
           const info = skuNameMap[skuId];
           itemMap[skuId] = {
             finishedSkuId: skuId, skuName: info?.name || skuId, barcode: info?.barcode || null,
             availableQty: qty, shipQty: 0, inventoryQty: qty, isShortage: false, needsMarking: false,
           };
+        }
+      }
+
+      // ── B. 마킹 완성품: 작업일 필터 ──
+      if (selectedMarkingDate) {
+        // 특정 날짜의 마킹 작업 이력에서 완성품 추출
+        const targetMarkingLogs = ((markingLogResult.data || []) as any[])
+          .filter((l: any) => l.action_date === selectedMarkingDate);
+        for (const log of targetMarkingLogs) {
+          for (const item of (log.summary?.items || []) as any[]) {
+            const skuId = item.skuId;
+            const qty = item.completedQty || 0;
+            if (!skuId || qty <= 0) continue;
+            if (itemMap[skuId]) { itemMap[skuId].availableQty += qty; continue; }
+            const info = skuNameMap[skuId];
+            itemMap[skuId] = {
+              finishedSkuId: skuId, skuName: info?.name || item.skuName || skuId, barcode: info?.barcode || null,
+              availableQty: qty, shipQty: 0, inventoryQty: inventoryMap[skuId] || 0,
+              isShortage: false, needsMarking: true,
+            };
+          }
+        }
+      } else {
+        // 전체: 완제품(26UN-*_*) 재고
+        const finishedSkuIds = Object.keys(inventoryMap)
+          .filter(skuId => (inventoryMap[skuId] || 0) > 0 && skuId.startsWith('26UN-') && skuId.includes('_'));
+
+        // SKU 이름 배치 조회
+        const missingNameSkus = finishedSkuIds.filter(s => !skuNameMap[s]);
+        if (missingNameSkus.length > 0) {
+          const { data: skuInfos } = await supabase.from('sku').select('sku_id, sku_name, barcode').in('sku_id', missingNameSkus);
+          for (const s of (skuInfos || []) as any[]) skuNameMap[s.sku_id] = { name: s.sku_name, barcode: s.barcode };
         }
 
         for (const skuId of finishedSkuIds) {
@@ -943,32 +960,51 @@ export default function ShipmentOut({ currentUser }: { currentUser: AppUser }) {
               <h3 className="font-medium text-gray-900">CJ 물류센터로 보낼 물량</h3>
               <p className="text-sm text-gray-500 mt-0.5">{selectedWo?.download_date} 기준</p>
             </div>
-            {receiptWaves.length > 1 && (
-              <select
-                value={selectedWave ?? 'all'}
-                onChange={async (e) => {
-                  const val = e.target.value;
-                  const wave = val === 'all' ? null : Number(val);
-                  setSelectedWave(wave);
-                  // selectOrder 내부에서 selectedWave state 대신 직접 전달 필요
-                  // → 페이지 리로드로 처리
-                  if (selectedWo) {
-                    setItems([]);
-                    setUploadComparison(null);
-                    // selectedWave가 업데이트된 후 selectOrder 호출을 위해 setTimeout 사용
-                    setTimeout(() => { if (selectedWo) selectOrder(selectedWo); }, 0);
-                  }
-                }}
-                className="text-sm border border-gray-300 rounded-lg px-3 py-1.5 bg-white"
-              >
-                <option value="all">전체 입고</option>
-                {receiptWaves.map((w) => (
-                  <option key={w.wave} value={w.wave}>
-                    {w.wave}차 입고 ({w.date}) — {w.totalQty}개
-                  </option>
-                ))}
-              </select>
-            )}
+            <div className="flex gap-2">
+              {receiptWaves.length > 1 && (
+                <select
+                  value={selectedWave ?? 'all'}
+                  onChange={async (e) => {
+                    const val = e.target.value;
+                    const wave = val === 'all' ? null : Number(val);
+                    setSelectedWave(wave);
+                    if (selectedWo) {
+                      setItems([]); setUploadComparison(null);
+                      setTimeout(() => { if (selectedWo) selectOrder(selectedWo); }, 0);
+                    }
+                  }}
+                  className="text-xs border border-emerald-300 rounded-lg px-2 py-1.5 bg-white text-emerald-700"
+                >
+                  <option value="all">단품: 전체</option>
+                  {receiptWaves.map((w) => (
+                    <option key={w.wave} value={w.wave}>
+                      단품: {w.wave}차 ({w.date})
+                    </option>
+                  ))}
+                </select>
+              )}
+              {markingSessions.length > 0 && (
+                <select
+                  value={selectedMarkingDate ?? 'all'}
+                  onChange={async (e) => {
+                    const val = e.target.value;
+                    setSelectedMarkingDate(val === 'all' ? null : val);
+                    if (selectedWo) {
+                      setItems([]); setUploadComparison(null);
+                      setTimeout(() => { if (selectedWo) selectOrder(selectedWo); }, 0);
+                    }
+                  }}
+                  className="text-xs border border-purple-300 rounded-lg px-2 py-1.5 bg-white text-purple-700"
+                >
+                  <option value="all">마킹: 전체</option>
+                  {markingSessions.map((s) => (
+                    <option key={s.date} value={s.date}>
+                      마킹: {s.date} ({s.totalQty}개)
+                    </option>
+                  ))}
+                </select>
+              )}
+            </div>
           </div>
         </div>
 
