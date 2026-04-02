@@ -41,7 +41,7 @@ export default function StockLedger() {
   const [rows, setRows] = useState<LedgerRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  useLoadingTimeout(loading, setLoading, setError);
+  useLoadingTimeout(loading, setLoading, setError, 120_000); // 수불부는 데이터 많아서 120초
 
   // CJ 엑셀 업로드
   const [uploadType, setUploadType] = useState<TxType | null>(null);
