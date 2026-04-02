@@ -5,7 +5,7 @@ import { recordTransactionBatch } from '../../lib/inventoryTransaction';
 import type { RecordTxParams } from '../../lib/inventoryTransaction';
 import { parseQtyExcel, generateTemplate } from '../../lib/excelUtils';
 import type { AppUser } from '../../types';
-import { AlertTriangle, CheckCircle, Download, FileUp, Search, Hammer } from 'lucide-react';
+import { AlertTriangle, CheckCircle, FileUp, Search, Hammer } from 'lucide-react';
 
 interface ManualMarkingItem {
   finishedSkuId: string;
