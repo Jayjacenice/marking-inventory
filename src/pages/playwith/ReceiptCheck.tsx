@@ -554,35 +554,38 @@ export default function ReceiptCheck({ currentUser }: { currentUser: AppUser }) 
       if (pwWarehouse) {
         const pwWhId = (pwWarehouse as any).id;
 
-        // SKU별 수량 합산 (같은 SKU가 마킹/단순출고로 중복될 수 있음 → 동시 쓰기 방지)
+        // SKU + needsMarking별 수량 합산 (같은 SKU도 마킹/단순출고 분리)
         const skuQtyMap: Record<string, number> = {};
         for (const item of activeItems) {
-          skuQtyMap[item.skuId] = (skuQtyMap[item.skuId] || 0) + item.actualQty;
+          const key = `${item.skuId}::${item.needsMarking ? 'true' : 'false'}`;
+          skuQtyMap[key] = (skuQtyMap[key] || 0) + item.actualQty;
         }
         const skuEntries = Object.entries(skuQtyMap);
 
-        // 재고 업데이트: SKU별 합산 수량으로 1회만 (순차 처리로 경쟁 상태 방지)
+        // 재고 업데이트: SKU+needsMarking별로 분리 저장
         for (let i = 0; i < skuEntries.length; i += BATCH) {
           const batch = skuEntries.slice(i, i + BATCH);
           progressStep++;
           setSaveProgress({ current: progressStep, total: stepsTotal, step: `재고 반영 중... (${Math.min(i + BATCH, skuEntries.length)} / ${skuEntries.length})` });
-          // 같은 배치 안에 같은 SKU 없으므로 Promise.all 안전
-          await Promise.all(batch.map(async ([skuId, totalQty]) => {
+          await Promise.all(batch.map(async ([key, totalQty]) => {
+            const [skuId, nmStr] = key.split('::');
+            const needsMarking = nmStr === 'true';
             const { data: existing } = await supabase
               .from('inventory')
               .select('quantity')
               .eq('warehouse_id', pwWhId)
               .eq('sku_id', skuId)
+              .eq('needs_marking', needsMarking)
               .maybeSingle();
             const newQty = ((existing as any)?.quantity || 0) + totalQty;
             await supabase.from('inventory').upsert(
-              { warehouse_id: pwWhId, sku_id: skuId, quantity: newQty },
-              { onConflict: 'warehouse_id,sku_id' }
+              { warehouse_id: pwWhId, sku_id: skuId, needs_marking: needsMarking, quantity: newQty },
+              { onConflict: 'warehouse_id,sku_id,needs_marking' }
             );
           }));
         }
 
-        // 트랜잭션 기록: 원본 아이템 단위로 기록 (마킹/단순출고 구분 유지)
+        // 트랜잭션 기록: 원본 아이템 단위 (needsMarking 포함)
         for (let i = 0; i < activeItems.length; i += BATCH) {
           const batch = activeItems.slice(i, i + BATCH);
           await Promise.all(batch.map((item) =>
@@ -591,6 +594,7 @@ export default function ReceiptCheck({ currentUser }: { currentUser: AppUser }) 
               skuId: item.skuId,
               txType: '입고',
               quantity: item.actualQty,
+              needsMarking: item.needsMarking,
               source: 'system',
               memo: `입고확인 ${currentWaveNum}차 (작업지시서 ${selectedOrder.download_date})`,
             })

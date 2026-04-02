@@ -258,7 +258,7 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
           .in('sku_id', componentSkuArr);
         if (isStale()) return;
         for (const inv of (invData || []) as any[]) {
-          inventoryMap[inv.sku_id] = inv.quantity || 0;
+          inventoryMap[inv.sku_id] = (inventoryMap[inv.sku_id] || 0) + (inv.quantity || 0);
         }
       }
 
@@ -672,20 +672,21 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
             txRows.push({
               warehouseId: pwWhId, skuId: comp.componentSkuId,
               txType: '마킹출고', quantity: comp.quantity * totalDiff, source: 'system',
+              needsMarking: true,
               memo: `마킹작업 구성품 차감 (${skuId}) ${today}`,
             });
           }
           txRows.push({
             warehouseId: pwWhId, skuId,
             txType: '마킹입고', quantity: totalDiff, source: 'system',
+            needsMarking: false,
             memo: `마킹작업 완성품 증가 ${today}`,
           });
         }
 
-        // 예정 외 항목: sources가 비어서 lineAllocation에 안 들어간 항목
+        // 예정 외 항목
         const extraMerged = activeItems.filter((i) => i.sources.length === 0 && i.todayQty > 0);
         if (extraMerged.length > 0) {
-          // BOM 조회
           const extraSkus = extraMerged.map((i) => i.finishedSkuId);
           const { data: extraBoms } = await supabase.from('bom')
             .select('finished_sku_id, component_sku_id, quantity')
@@ -701,12 +702,14 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
               txRows.push({
                 warehouseId: pwWhId, skuId: comp.componentSkuId,
                 txType: '마킹출고', quantity: comp.quantity * extra.todayQty, source: 'system',
+                needsMarking: true,
                 memo: `마킹작업 구성품 차감 (${extra.finishedSkuId}) ${today}`,
               });
             }
             txRows.push({
               warehouseId: pwWhId, skuId: extra.finishedSkuId,
               txType: '마킹입고', quantity: extra.todayQty, source: 'system',
+              needsMarking: false,
               memo: `마킹작업 완성품 증가 ${today}`,
             });
           }
@@ -1077,6 +1080,7 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
               txRows.push({
                 warehouseId: pwWhId, skuId: comp.componentSkuId,
                 txType: '마킹출고', quantity: deltaQty, source: 'system',
+                needsMarking: true, // 마킹용 구성품에서 차감
                 memo: `마킹작업 구성품 차감 (${d.finishedSkuId}) ${today}`,
               });
             }
@@ -1085,11 +1089,12 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
             txRows.push({
               warehouseId: pwWhId, skuId: d.finishedSkuId,
               txType: '마킹입고', quantity: d.diff, source: 'system',
+              needsMarking: false, // 완성품은 출고 대상
               memo: `마킹작업 완성품 증가 ${today}`,
             });
           }
         }
-        // 예정 외 항목 트랜잭션 (BOM 기반 마킹출고 + 완성품 마킹입고)
+        // 예정 외 항목 트랜잭션
         for (const extra of extraItems) {
           const components = extraBomMap[extra.finishedSkuId] || [];
           for (const comp of components) {
@@ -1098,6 +1103,7 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
               txRows.push({
                 warehouseId: pwWhId, skuId: comp.componentSkuId,
                 txType: '마킹출고', quantity: deltaQty, source: 'system',
+                needsMarking: true,
                 memo: `마킹작업 구성품 차감 (${extra.finishedSkuId}) ${today}`,
               });
             }
@@ -1105,6 +1111,7 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
           txRows.push({
             warehouseId: pwWhId, skuId: extra.finishedSkuId,
             txType: '마킹입고', quantity: extra.todayQty, source: 'system',
+            needsMarking: false,
             memo: `마킹작업 완성품 증가 ${today}`,
           });
         }

@@ -115,7 +115,7 @@ export default function ShipmentOut({ currentUser }: { currentUser: AppUser }) {
       const [inventoryResult, outLogResult, shipLogResult] = await Promise.all([
         supabase
           .from('inventory')
-          .select('sku_id, quantity')
+          .select('sku_id, quantity, needs_marking')
           .eq('warehouse_id', warehouseId),
         supabase
           .from('activity_log')
@@ -132,9 +132,17 @@ export default function ShipmentOut({ currentUser }: { currentUser: AppUser }) {
       if (inventoryResult.error) throw inventoryResult.error;
       if (isStale()) return;
 
-      const inventoryMap: Record<string, number> = {};
+      // needs_marking별 분리 재고맵
+      const invDirect: Record<string, number> = {};   // needs_marking=false (단품)
+      const invMarking: Record<string, number> = {};  // needs_marking=true (마킹용)
+      const inventoryMap: Record<string, number> = {}; // 합산 (하위호환)
       for (const inv of (inventoryResult.data || []) as any[]) {
-        inventoryMap[inv.sku_id] = inv.quantity;
+        inventoryMap[inv.sku_id] = (inventoryMap[inv.sku_id] || 0) + inv.quantity;
+        if (inv.needs_marking) {
+          invMarking[inv.sku_id] = (invMarking[inv.sku_id] || 0) + inv.quantity;
+        } else {
+          invDirect[inv.sku_id] = (invDirect[inv.sku_id] || 0) + inv.quantity;
+        }
       }
 
       // 이전 출고 수량 — needsMarking별 분리
@@ -174,21 +182,15 @@ export default function ShipmentOut({ currentUser }: { currentUser: AppUser }) {
         };
       }
 
-      // 발송 이력에서 단품 SKU 목록 (단품으로 발송된 SKU만 단품으로 표시)
-      const directSkuSet = new Set<string>();
-      for (const log of (shipLogResult.data || []) as any[]) {
-        for (const item of (log.summary?.items || []) as any[]) {
-          if (item.needsMarking === false) directSkuSet.add(item.skuId);
-        }
-      }
+      // A. 단품(needs_marking=false): invDirect에서 재고 > 0인 SKU
+      const directSkuIds = Object.entries(invDirect).filter(([, qty]) => qty > 0).map(([skuId]) => skuId);
+      // B. 마킹 완성품: 완제품 패턴(26UN-*_*) 재고 (needs_marking 무관 — 마킹입고는 기본 false)
+      const finishedSkuIds = Object.keys(inventoryMap)
+        .filter(skuId => (inventoryMap[skuId] || 0) > 0 && skuId.startsWith('26UN-') && skuId.includes('_'));
 
-      // 재고가 있는 모든 SKU를 순회
-      const allSkuIds = Object.entries(inventoryMap)
-        .filter(([, qty]) => qty > 0)
-        .map(([skuId]) => skuId);
-
-      // work_order_line에 없는 SKU 이름 배치 조회
-      const missingNameSkus = allSkuIds.filter(s => !skuNameMap[s]);
+      // SKU 이름 배치 조회 (work_order_line에 없는 것)
+      const allShipSkuIds = [...new Set([...directSkuIds, ...finishedSkuIds])];
+      const missingNameSkus = allShipSkuIds.filter(s => !skuNameMap[s]);
       if (missingNameSkus.length > 0) {
         const { data: skuInfos } = await supabase
           .from('sku')
@@ -199,41 +201,38 @@ export default function ShipmentOut({ currentUser }: { currentUser: AppUser }) {
         }
       }
 
-      for (const skuId of allSkuIds) {
-        const qty = inventoryMap[skuId];
-        // 완제품(마킹 완성품): 26UN-*_* 패턴
-        const isFinishedProduct = skuId.startsWith('26UN-') && skuId.includes('_');
-        // 단품: 발송 이력에서 needsMarking=false로 발송된 SKU
-        const isDirect = directSkuSet.has(skuId);
+      // A. 단품: needs_marking=false 재고 기준
+      for (const skuId of directSkuIds) {
+        const qty = invDirect[skuId];
+        if (skuId.startsWith('26UN-') && skuId.includes('_')) continue; // 완제품은 B에서 처리
+        const info = skuNameMap[skuId];
+        itemMap[skuId] = {
+          finishedSkuId: skuId,
+          skuName: info?.name || skuId,
+          barcode: info?.barcode || null,
+          availableQty: qty,
+          shipQty: 0,
+          inventoryQty: qty,
+          isShortage: false,
+          needsMarking: false,
+        };
+      }
 
-        if (isFinishedProduct) {
-          // 마킹 완성품
-          const info = skuNameMap[skuId];
-          itemMap[skuId] = {
-            finishedSkuId: skuId,
-            skuName: info?.name || skuId,
-            barcode: info?.barcode || null,
-            availableQty: qty,
-            shipQty: 0,
-            inventoryQty: qty,
-            isShortage: false,
-            needsMarking: true,
-          };
-        } else if (isDirect) {
-          // 단품 (발송 이력에서 단품으로 확인된 SKU)
-          const info = skuNameMap[skuId];
-          itemMap[skuId] = {
-            finishedSkuId: skuId,
-            skuName: info?.name || skuId,
-            barcode: info?.barcode || null,
-            availableQty: qty,
-            shipQty: 0,
-            inventoryQty: qty,
-            isShortage: false,
-            needsMarking: false,
-          };
-        }
-        // 마킹 구성품(유니폼 단품, 마킹키트)은 표시하지 않음 — 출고 대상 아님
+      // B. 마킹 완성품: 플레이위즈 재고 (완제품 SKU 패턴)
+      for (const skuId of finishedSkuIds) {
+        if (itemMap[skuId]) continue;
+        const qty = inventoryMap[skuId];
+        const info = skuNameMap[skuId];
+        itemMap[skuId] = {
+          finishedSkuId: skuId,
+          skuName: info?.name || skuId,
+          barcode: info?.barcode || null,
+          availableQty: qty,
+          shipQty: 0,
+          inventoryQty: qty,
+          isShortage: false,
+          needsMarking: true,
+        };
       }
 
       // 이전 출고분 차감 후 출고 가능 수량 계산
@@ -439,16 +438,21 @@ export default function ShipmentOut({ currentUser }: { currentUser: AppUser }) {
           const batch = activeItems.slice(i, i + BATCH);
           setConfirmProgress({ current: step, total: totalSteps, step: `재고 차감 중... (${Math.min(i + BATCH, activeItems.length)} / ${activeItems.length})` });
           await Promise.all(batch.map(async (item) => {
+            // needs_marking별로 재고 차감 (단품은 needs_marking=false에서, 마킹은 true/false 합산에서)
+            const nmFilter = item.needsMarking ? true : false;
             const { data: inv } = await supabase
               .from('inventory')
-              .select('id, quantity')
+              .select('quantity')
               .eq('warehouse_id', whId)
               .eq('sku_id', item.finishedSkuId)
+              .eq('needs_marking', nmFilter)
               .maybeSingle();
             if (inv) {
               await supabase.from('inventory')
                 .update({ quantity: Math.max(0, (inv as any).quantity - item.shipQty) })
-                .eq('id', (inv as any).id);
+                .eq('warehouse_id', whId)
+                .eq('sku_id', item.finishedSkuId)
+                .eq('needs_marking', nmFilter);
             }
             await recordTransaction({
               warehouseId: whId,
@@ -456,6 +460,7 @@ export default function ShipmentOut({ currentUser }: { currentUser: AppUser }) {
               txType: '출고',
               quantity: item.shipQty,
               source: 'system',
+              needsMarking: item.needsMarking,
               memo: `출고확인 (작업지시서 ${selectedWo.download_date})`,
             });
           }));

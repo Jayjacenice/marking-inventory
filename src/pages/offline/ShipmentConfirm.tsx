@@ -178,7 +178,7 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
       const offWhId = (offWh as any)?.id;
       const offlineInvMap: Record<string, number> = {};
       if (offWhId) {
-        const { data: invData } = await supabase.from('inventory').select('sku_id, quantity').eq('warehouse_id', offWhId);
+        const { data: invData } = await supabase.from('inventory').select('sku_id, quantity').eq('warehouse_id', offWhId).eq('needs_marking', false);
         for (const inv of (invData || []) as any[]) offlineInvMap[inv.sku_id] = inv.quantity;
       }
 
@@ -330,7 +330,7 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
         supabase.from('bom')
           .select('finished_sku_id, component_sku_id, quantity, component:sku!bom_component_sku_id_fkey(sku_id, sku_name, barcode)')
           .in('finished_sku_id', markingSkuIds.length > 0 ? markingSkuIds : ['__none__']),
-        supabase.from('inventory').select('sku_id, quantity').eq('warehouse_id', offlineWarehouseId),
+        supabase.from('inventory').select('sku_id, quantity').eq('warehouse_id', offlineWarehouseId).eq('needs_marking', false),
       ]);
       if (bomResult.error) throw bomResult.error;
       if (invResult.error) throw invResult.error;
@@ -1130,13 +1130,13 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
           const batch = skuEntries.slice(i, i + BATCH);
           await Promise.all(batch.map(async ([skuId, qty]) => {
             const { data: inv } = await supabase
-              .from('inventory').select('id, quantity')
-              .eq('warehouse_id', whId).eq('sku_id', skuId).maybeSingle();
-            if (inv) {
-              await supabase.from('inventory')
-                .update({ quantity: Math.max(0, (inv as any).quantity - qty) })
-                .eq('id', (inv as any).id);
-            }
+              .from('inventory').select('quantity')
+              .eq('warehouse_id', whId).eq('sku_id', skuId).eq('needs_marking', false).maybeSingle();
+            const newQty = Math.max(0, ((inv as any)?.quantity || 0) - qty);
+            await supabase.from('inventory').upsert(
+              { warehouse_id: whId, sku_id: skuId, needs_marking: false, quantity: newQty },
+              { onConflict: 'warehouse_id,sku_id,needs_marking' }
+            );
           }));
         }
         // 트랜잭션 기록은 WO별로 분리 (memo에 작업지시서 날짜 포함 → 롤백 가능)
@@ -1389,16 +1389,16 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
           await Promise.all(batch.map(async (item) => {
             const { data: inv } = await supabase
               .from('inventory')
-              .select('id, quantity')
+              .select('quantity')
               .eq('warehouse_id', whId)
               .eq('sku_id', item.skuId)
+              .eq('needs_marking', false)
               .maybeSingle();
-            if (inv) {
-              await supabase
-                .from('inventory')
-                .update({ quantity: Math.max(0, (inv as any).quantity - item.sentQty) })
-                .eq('id', (inv as any).id);
-            }
+            const newQty = Math.max(0, ((inv as any)?.quantity || 0) - item.sentQty);
+            await supabase.from('inventory').upsert(
+              { warehouse_id: whId, sku_id: item.skuId, needs_marking: false, quantity: newQty },
+              { onConflict: 'warehouse_id,sku_id,needs_marking' }
+            );
             await recordTransaction({
               warehouseId: whId,
               skuId: item.skuId,

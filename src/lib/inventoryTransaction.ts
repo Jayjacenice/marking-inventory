@@ -10,6 +10,7 @@ export interface RecordTxParams {
   source: TxSource;
   txDate?: string;
   memo?: string;
+  needsMarking?: boolean;
 }
 
 /** 재고 변동 1건 기록 */
@@ -26,6 +27,7 @@ export async function recordTransaction(params: RecordTxParams): Promise<void> {
     source: params.source,
     tx_date: params.txDate || new Date().toISOString().slice(0, 10),
     memo: params.memo || null,
+    needs_marking: params.needsMarking ?? false,
   });
   if (error) console.error('[inventoryTransaction] insert error:', error);
 }
@@ -122,6 +124,7 @@ export async function recordTransactionBatch(
     source: r.source,
     tx_date: r.txDate || new Date().toISOString().slice(0, 10),
     memo: r.memo || null,
+    needs_marking: r.needsMarking ?? false,
   }));
 
   // 2) 500건씩 배치 insert
@@ -160,11 +163,12 @@ export async function recordTransactionBatch(
 
 /** 트랜잭션 기록 후 inventory 테이블에 재고 반영 */
 async function syncInventoryFromTransactions(rows: RecordTxParams[]): Promise<void> {
-  // SKU별 순변동 집계 (입고/반품 = +, 출고 = -)
-  const deltaMap = new Map<string, { warehouseId: string; skuId: string; delta: number }>();
+  // SKU별 + needs_marking별 순변동 집계 (입고/반품 = +, 출고 = -)
+  const deltaMap = new Map<string, { warehouseId: string; skuId: string; needsMarking: boolean; delta: number }>();
   for (const r of rows) {
-    const key = `${r.warehouseId}|${r.skuId}`;
-    if (!deltaMap.has(key)) deltaMap.set(key, { warehouseId: r.warehouseId, skuId: r.skuId, delta: 0 });
+    const nm = r.needsMarking ?? false;
+    const key = `${r.warehouseId}|${r.skuId}|${nm}`;
+    if (!deltaMap.has(key)) deltaMap.set(key, { warehouseId: r.warehouseId, skuId: r.skuId, needsMarking: nm, delta: 0 });
     const entry = deltaMap.get(key)!;
     switch (r.txType) {
       case '입고': entry.delta += r.quantity; break;
@@ -188,27 +192,28 @@ async function syncInventoryFromTransactions(rows: RecordTxParams[]): Promise<vo
     // 현재 inventory 조회
     const { data: existing } = await supabaseAdmin
       .from('inventory')
-      .select('warehouse_id, sku_id, quantity')
+      .select('warehouse_id, sku_id, needs_marking, quantity')
       .eq('warehouse_id', batch[0].warehouseId)
       .in('sku_id', skuIds);
 
     const existingMap = new Map(
-      (existing || []).map((e) => [`${e.warehouse_id}|${e.sku_id}`, e.quantity as number])
+      (existing || []).map((e) => [`${e.warehouse_id}|${e.sku_id}|${e.needs_marking ?? false}`, e.quantity as number])
     );
 
     // upsert 데이터 준비
     const upsertRows = batch.map((e) => {
-      const currentQty = existingMap.get(`${e.warehouseId}|${e.skuId}`) || 0;
+      const currentQty = existingMap.get(`${e.warehouseId}|${e.skuId}|${e.needsMarking}`) || 0;
       return {
         warehouse_id: e.warehouseId,
         sku_id: e.skuId,
+        needs_marking: e.needsMarking,
         quantity: Math.max(0, currentQty + e.delta),
       };
     });
 
     const { error } = await supabaseAdmin
       .from('inventory')
-      .upsert(upsertRows, { onConflict: 'warehouse_id,sku_id' });
+      .upsert(upsertRows, { onConflict: 'warehouse_id,sku_id,needs_marking' });
     if (error) console.error('[inventoryTransaction] inventory upsert error:', error);
   }
 }
@@ -223,7 +228,7 @@ export async function deleteCjTransactions(params: {
   // 1) 삭제 대상 트랜잭션 조회 (inventory 역반영용)
   const { data: txToDelete, error: fetchErr } = await supabaseAdmin
     .from('inventory_transaction')
-    .select('sku_id, tx_type, quantity')
+    .select('sku_id, tx_type, quantity, needs_marking')
     .eq('source', 'cj_excel')
     .eq('warehouse_id', params.warehouseId)
     .eq('tx_type', params.txType)
@@ -254,44 +259,55 @@ export async function deleteCjTransactions(params: {
   }
 
   // 3) inventory 역반영 (삭제된 트랜잭션의 반대 방향)
-  const reverseDelta = new Map<string, number>();
+  const reverseDelta = new Map<string, { delta: number; needsMarking: boolean }>();
   for (const tx of txToDelete || []) {
-    const current = reverseDelta.get(tx.sku_id) || 0;
+    const nm = tx.needs_marking ?? false;
+    const key = `${tx.sku_id}|${nm}`;
+    if (!reverseDelta.has(key)) reverseDelta.set(key, { delta: 0, needsMarking: nm });
+    const entry = reverseDelta.get(key)!;
     switch (tx.tx_type as TxType) {
-      case '입고': reverseDelta.set(tx.sku_id, current - tx.quantity); break;
-      case '이동입고': reverseDelta.set(tx.sku_id, current - tx.quantity); break;
-      case '출고': reverseDelta.set(tx.sku_id, current + tx.quantity); break;
-      case '반품': reverseDelta.set(tx.sku_id, current - tx.quantity); break;
-      case '재고조정': reverseDelta.set(tx.sku_id, current - tx.quantity); break;
-      case '마킹출고': reverseDelta.set(tx.sku_id, current + tx.quantity); break;
-      case '마킹입고': reverseDelta.set(tx.sku_id, current - tx.quantity); break;
-      case '판매': reverseDelta.set(tx.sku_id, current + tx.quantity); break;
-      case '기초재고': reverseDelta.set(tx.sku_id, current - tx.quantity); break;
+      case '입고': entry.delta -= tx.quantity; break;
+      case '이동입고': entry.delta -= tx.quantity; break;
+      case '출고': entry.delta += tx.quantity; break;
+      case '반품': entry.delta -= tx.quantity; break;
+      case '재고조정': entry.delta -= tx.quantity; break;
+      case '마킹출고': entry.delta += tx.quantity; break;
+      case '마킹입고': entry.delta -= tx.quantity; break;
+      case '판매': entry.delta += tx.quantity; break;
+      case '기초재고': entry.delta -= tx.quantity; break;
     }
   }
 
-  const skuIds = [...reverseDelta.keys()];
+  const deltaKeys = [...reverseDelta.keys()];
+  const skuIds = [...new Set(deltaKeys.map((k) => k.split('|')[0]))];
   for (let i = 0; i < skuIds.length; i += 500) {
     const batch = skuIds.slice(i, i + 500);
     const { data: existing } = await supabaseAdmin
       .from('inventory')
-      .select('sku_id, quantity')
+      .select('sku_id, needs_marking, quantity')
       .eq('warehouse_id', params.warehouseId)
       .in('sku_id', batch);
 
     const existingMap = new Map(
-      (existing || []).map((e) => [e.sku_id, e.quantity as number])
+      (existing || []).map((e) => [`${e.sku_id}|${e.needs_marking ?? false}`, e.quantity as number])
     );
 
-    const upsertRows = batch.map((skuId) => ({
-      warehouse_id: params.warehouseId,
-      sku_id: skuId,
-      quantity: Math.max(0, (existingMap.get(skuId) || 0) + (reverseDelta.get(skuId) || 0)),
-    }));
+    const upsertRows = deltaKeys
+      .filter((k) => batch.includes(k.split('|')[0]))
+      .map((key) => {
+        const skuId = key.split('|')[0];
+        const entry = reverseDelta.get(key)!;
+        return {
+          warehouse_id: params.warehouseId,
+          sku_id: skuId,
+          needs_marking: entry.needsMarking,
+          quantity: Math.max(0, (existingMap.get(key) || 0) + entry.delta),
+        };
+      });
 
     const { error: upsertErr } = await supabaseAdmin
       .from('inventory')
-      .upsert(upsertRows, { onConflict: 'warehouse_id,sku_id' });
+      .upsert(upsertRows, { onConflict: 'warehouse_id,sku_id,needs_marking' });
     if (upsertErr) console.error('[inventoryTransaction] delete inventory reverse error:', upsertErr);
   }
 
@@ -307,7 +323,7 @@ export async function deleteSystemTransactions(params: {
   // 1) 삭제 대상 트랜잭션 조회
   let query = supabaseAdmin
     .from('inventory_transaction')
-    .select('sku_id, tx_type, quantity')
+    .select('sku_id, tx_type, quantity, needs_marking')
     .eq('source', 'system')
     .eq('warehouse_id', params.warehouseId);
   if (params.memoLike) {
@@ -344,44 +360,55 @@ export async function deleteSystemTransactions(params: {
   }
 
   // 3) inventory 역반영 (삭제된 트랜잭션의 반대 방향)
-  const reverseDelta = new Map<string, number>();
+  const reverseDelta = new Map<string, { delta: number; needsMarking: boolean }>();
   for (const tx of txToDelete || []) {
-    const current = reverseDelta.get(tx.sku_id) || 0;
+    const nm = tx.needs_marking ?? false;
+    const key = `${tx.sku_id}|${nm}`;
+    if (!reverseDelta.has(key)) reverseDelta.set(key, { delta: 0, needsMarking: nm });
+    const entry = reverseDelta.get(key)!;
     switch (tx.tx_type as TxType) {
-      case '입고': reverseDelta.set(tx.sku_id, current - tx.quantity); break;
-      case '이동입고': reverseDelta.set(tx.sku_id, current - tx.quantity); break;
-      case '출고': reverseDelta.set(tx.sku_id, current + tx.quantity); break;
-      case '반품': reverseDelta.set(tx.sku_id, current - tx.quantity); break;
-      case '재고조정': reverseDelta.set(tx.sku_id, current - tx.quantity); break;
-      case '마킹출고': reverseDelta.set(tx.sku_id, current + tx.quantity); break;
-      case '마킹입고': reverseDelta.set(tx.sku_id, current - tx.quantity); break;
-      case '판매': reverseDelta.set(tx.sku_id, current + tx.quantity); break;
-      case '기초재고': reverseDelta.set(tx.sku_id, current - tx.quantity); break;
+      case '입고': entry.delta -= tx.quantity; break;
+      case '이동입고': entry.delta -= tx.quantity; break;
+      case '출고': entry.delta += tx.quantity; break;
+      case '반품': entry.delta -= tx.quantity; break;
+      case '재고조정': entry.delta -= tx.quantity; break;
+      case '마킹출고': entry.delta += tx.quantity; break;
+      case '마킹입고': entry.delta -= tx.quantity; break;
+      case '판매': entry.delta += tx.quantity; break;
+      case '기초재고': entry.delta -= tx.quantity; break;
     }
   }
 
-  const skuIds = [...reverseDelta.keys()];
+  const deltaKeys = [...reverseDelta.keys()];
+  const skuIds = [...new Set(deltaKeys.map((k) => k.split('|')[0]))];
   for (let i = 0; i < skuIds.length; i += 500) {
     const batch = skuIds.slice(i, i + 500);
     const { data: existing } = await supabaseAdmin
       .from('inventory')
-      .select('sku_id, quantity')
+      .select('sku_id, needs_marking, quantity')
       .eq('warehouse_id', params.warehouseId)
       .in('sku_id', batch);
 
     const existingMap = new Map(
-      (existing || []).map((e) => [e.sku_id, e.quantity as number])
+      (existing || []).map((e) => [`${e.sku_id}|${e.needs_marking ?? false}`, e.quantity as number])
     );
 
-    const upsertRows = batch.map((skuId) => ({
-      warehouse_id: params.warehouseId,
-      sku_id: skuId,
-      quantity: Math.max(0, (existingMap.get(skuId) || 0) + (reverseDelta.get(skuId) || 0)),
-    }));
+    const upsertRows = deltaKeys
+      .filter((k) => batch.includes(k.split('|')[0]))
+      .map((key) => {
+        const skuId = key.split('|')[0];
+        const entry = reverseDelta.get(key)!;
+        return {
+          warehouse_id: params.warehouseId,
+          sku_id: skuId,
+          needs_marking: entry.needsMarking,
+          quantity: Math.max(0, (existingMap.get(key) || 0) + entry.delta),
+        };
+      });
 
     const { error: upsertErr } = await supabaseAdmin
       .from('inventory')
-      .upsert(upsertRows, { onConflict: 'warehouse_id,sku_id' });
+      .upsert(upsertRows, { onConflict: 'warehouse_id,sku_id,needs_marking' });
     if (upsertErr) console.error('[inventoryTransaction] delete system inventory reverse error:', upsertErr);
   }
 
@@ -414,7 +441,7 @@ export async function deletePosTransactions(params: {
 }): Promise<{ deleted: number; error: string | null }> {
   const { data: txToDelete, error: fetchErr } = await supabaseAdmin
     .from('inventory_transaction')
-    .select('sku_id, tx_type, quantity')
+    .select('sku_id, tx_type, quantity, needs_marking')
     .eq('source', 'pos_excel')
     .eq('warehouse_id', params.warehouseId)
     .eq('tx_type', '판매')
@@ -437,33 +464,44 @@ export async function deletePosTransactions(params: {
   if (error) return { deleted: 0, error: error.message };
 
   // inventory 역반영 (판매 삭제 = 재고 복구)
-  const reverseDelta = new Map<string, number>();
+  const reverseDelta = new Map<string, { delta: number; needsMarking: boolean }>();
   for (const tx of txToDelete || []) {
-    reverseDelta.set(tx.sku_id, (reverseDelta.get(tx.sku_id) || 0) + tx.quantity);
+    const nm = tx.needs_marking ?? false;
+    const key = `${tx.sku_id}|${nm}`;
+    if (!reverseDelta.has(key)) reverseDelta.set(key, { delta: 0, needsMarking: nm });
+    reverseDelta.get(key)!.delta += tx.quantity;
   }
 
-  const skuIds = [...reverseDelta.keys()];
+  const deltaKeys = [...reverseDelta.keys()];
+  const skuIds = [...new Set(deltaKeys.map((k) => k.split('|')[0]))];
   for (let i = 0; i < skuIds.length; i += 500) {
     const batch = skuIds.slice(i, i + 500);
     const { data: existing } = await supabaseAdmin
       .from('inventory')
-      .select('sku_id, quantity')
+      .select('sku_id, needs_marking, quantity')
       .eq('warehouse_id', params.warehouseId)
       .in('sku_id', batch);
 
     const existingMap = new Map(
-      (existing || []).map((e) => [e.sku_id, e.quantity as number])
+      (existing || []).map((e) => [`${e.sku_id}|${e.needs_marking ?? false}`, e.quantity as number])
     );
 
-    const upsertRows = batch.map((skuId) => ({
-      warehouse_id: params.warehouseId,
-      sku_id: skuId,
-      quantity: Math.max(0, (existingMap.get(skuId) || 0) + (reverseDelta.get(skuId) || 0)),
-    }));
+    const upsertRows = deltaKeys
+      .filter((k) => batch.includes(k.split('|')[0]))
+      .map((key) => {
+        const skuId = key.split('|')[0];
+        const entry = reverseDelta.get(key)!;
+        return {
+          warehouse_id: params.warehouseId,
+          sku_id: skuId,
+          needs_marking: entry.needsMarking,
+          quantity: Math.max(0, (existingMap.get(key) || 0) + entry.delta),
+        };
+      });
 
     await supabaseAdmin
       .from('inventory')
-      .upsert(upsertRows, { onConflict: 'warehouse_id,sku_id' });
+      .upsert(upsertRows, { onConflict: 'warehouse_id,sku_id,needs_marking' });
   }
 
   return { deleted: deleteCount, error: null };
