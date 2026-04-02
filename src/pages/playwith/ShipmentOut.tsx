@@ -738,12 +738,10 @@ export default function ShipmentOut({ currentUser }: { currentUser: AppUser }) {
 
   const isMarkingDone = selectedWo?.status === '마킹완료';
   const isShipmentReady = selectedWo?.status === '마킹중' || selectedWo?.status === '마킹완료';
-  const hasShortage = items.some((item) => item.isShortage);
   const markingItems = items.filter((i) => i.needsMarking);
   const directItems = items.filter((i) => !i.needsMarking);
   const totalMarkingQty = markingItems.reduce((s, i) => s + i.shipQty, 0);
   const totalDirectQty = directItems.reduce((s, i) => s + i.shipQty, 0);
-  const totalShipQty = totalMarkingQty + totalDirectQty;
   const totalMarkingAvailable = markingItems.reduce((s, i) => s + i.availableQty, 0);
   const totalDirectAvailable = directItems.reduce((s, i) => s + i.availableQty, 0);
 
