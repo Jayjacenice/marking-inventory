@@ -43,6 +43,10 @@ export default function ShipmentOut({ currentUser }: { currentUser: AppUser }) {
   const [xlsxError, setXlsxError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // 입고 차수 필터
+  const [receiptWaves, setReceiptWaves] = useState<{ wave: number; date: string; totalQty: number }[]>([]);
+  const [selectedWave, setSelectedWave] = useState<number | null>(null); // null = 전체
+
   // 이력 조회
   const today = new Date().toISOString().split('T')[0];
   const [selectedDate, setSelectedDate] = useState(today);
@@ -111,8 +115,8 @@ export default function ShipmentOut({ currentUser }: { currentUser: AppUser }) {
       const lineList = (linesResult.data || []) as any[];
       const warehouseId = (warehouseResult.data as any)?.id;
 
-      // 2단계: inventory + 이전 출고 이력 + 발송 이력(단품 구분용) 병렬 조회
-      const [inventoryResult, outLogResult, shipLogResult] = await Promise.all([
+      // 2단계: inventory + 이전 출고 이력 + 발송 이력 + 입고 이력 병렬 조회
+      const [inventoryResult, outLogResult, shipLogResult, recLogResult] = await Promise.all([
         supabase
           .from('inventory')
           .select('sku_id, quantity, needs_marking')
@@ -122,15 +126,29 @@ export default function ShipmentOut({ currentUser }: { currentUser: AppUser }) {
           .select('summary')
           .eq('work_order_id', wo.id)
           .eq('action_type', 'shipment_out'),
-        // 발송 이력에서 needsMarking 정보 추출 (단품 구분)
         supabase
           .from('activity_log')
           .select('summary')
           .eq('work_order_id', wo.id)
           .eq('action_type', 'shipment_confirm'),
+        // 입고 차수 목록
+        supabase
+          .from('activity_log')
+          .select('action_date, summary')
+          .eq('work_order_id', wo.id)
+          .eq('action_type', 'receipt_check')
+          .order('created_at', { ascending: true }),
       ]);
       if (inventoryResult.error) throw inventoryResult.error;
       if (isStale()) return;
+
+      // 입고 차수 목록 구성
+      const waves = ((recLogResult.data || []) as any[]).map((l: any) => ({
+        wave: l.summary?.wave || 1,
+        date: l.action_date,
+        totalQty: (l.summary?.items || []).reduce((s: number, i: any) => s + (i.actualQty || 0), 0),
+      }));
+      setReceiptWaves(waves);
 
       // needs_marking별 분리 재고맵
       const invDirect: Record<string, number> = {};   // needs_marking=false (단품)
@@ -169,11 +187,24 @@ export default function ShipmentOut({ currentUser }: { currentUser: AppUser }) {
         }
       }
 
-      // 4. 플레이위즈 실재고 기준으로 출고 가능 수량 집계
-      // 단품/마킹 구분: 완제품(26UN-*_*) → needsMarking=true, 나머지 → needsMarking=false
+      // 입고 차수 필터링: 선택된 차수의 발송 이력에서 SKU 필터
+      let waveFilter: Record<string, { qty: number; needsMarking: boolean }> | null = null;
+      if (selectedWave !== null) {
+        // 선택된 차수에 해당하는 발송 이력 찾기 (wave 번호로 매칭)
+        const targetShipLog = ((shipLogResult.data || []) as any[])
+          .find((l: any) => l.summary?.wave === selectedWave);
+        if (targetShipLog) {
+          waveFilter = {};
+          for (const item of (targetShipLog.summary?.items || []) as any[]) {
+            waveFilter[item.skuId] = { qty: item.sentQty || 0, needsMarking: item.needsMarking ?? false };
+          }
+        }
+      }
+
+      // 4. 출고 가능 수량 집계
       const itemMap: Record<string, ShipmentOutItem> = {};
 
-      // SKU 이름 조회용 맵 (work_order_line에서)
+      // SKU 이름 조회용 맵
       const skuNameMap: Record<string, { name: string; barcode: string | null }> = {};
       for (const line of lineList) {
         skuNameMap[line.finished_sku_id] = {
@@ -182,47 +213,59 @@ export default function ShipmentOut({ currentUser }: { currentUser: AppUser }) {
         };
       }
 
-      // A. 단품(needs_marking=false): invDirect에서 재고 > 0인 SKU
-      const directSkuIds = Object.entries(invDirect).filter(([, qty]) => qty > 0).map(([skuId]) => skuId);
-      // B. 마킹 완성품: 완제품 패턴(26UN-*_*) 재고 (needs_marking 무관 — 마킹입고는 기본 false)
-      const finishedSkuIds = Object.keys(inventoryMap)
-        .filter(skuId => (inventoryMap[skuId] || 0) > 0 && skuId.startsWith('26UN-') && skuId.includes('_'));
-
-      // SKU 이름 배치 조회 (work_order_line에 없는 것)
-      const allShipSkuIds = [...new Set([...directSkuIds, ...finishedSkuIds])];
-      const missingNameSkus = allShipSkuIds.filter(s => !skuNameMap[s]);
-      if (missingNameSkus.length > 0) {
-        const { data: skuInfos } = await supabase
-          .from('sku')
-          .select('sku_id, sku_name, barcode')
-          .in('sku_id', missingNameSkus);
-        for (const s of (skuInfos || []) as any[]) {
-          skuNameMap[s.sku_id] = { name: s.sku_name, barcode: s.barcode };
+      if (waveFilter) {
+        // ── 차수별 보기: 해당 차수의 발송 SKU만 표시 ──
+        const waveSkuIds = Object.keys(waveFilter);
+        const missingNameSkus = waveSkuIds.filter(s => !skuNameMap[s]);
+        if (missingNameSkus.length > 0) {
+          const { data: skuInfos } = await supabase.from('sku').select('sku_id, sku_name, barcode').in('sku_id', missingNameSkus);
+          for (const s of (skuInfos || []) as any[]) skuNameMap[s.sku_id] = { name: s.sku_name, barcode: s.barcode };
         }
-      }
+        for (const [skuId, { qty, needsMarking }] of Object.entries(waveFilter)) {
+          if (qty <= 0) continue;
+          // 재고 확인 (needs_marking별)
+          const invQty = needsMarking ? (invDirect[skuId] || 0) : (invDirect[skuId] || 0);
+          const info = skuNameMap[skuId];
+          itemMap[skuId] = {
+            finishedSkuId: skuId,
+            skuName: info?.name || skuId,
+            barcode: info?.barcode || null,
+            availableQty: qty,
+            shipQty: 0,
+            inventoryQty: invQty,
+            isShortage: false,
+            needsMarking,
+          };
+        }
+      } else {
+        // ── 전체 보기: 기존 로직 ──
+        // A. 단품(needs_marking=false): invDirect에서 재고 > 0인 SKU
+        const directSkuIds = Object.entries(invDirect).filter(([, qty]) => qty > 0).map(([skuId]) => skuId);
+        // B. 마킹 완성품: 완제품 패턴(26UN-*_*) 재고
+        const finishedSkuIds = Object.keys(inventoryMap)
+          .filter(skuId => (inventoryMap[skuId] || 0) > 0 && skuId.startsWith('26UN-') && skuId.includes('_'));
 
-      // A. 단품: needs_marking=false 재고 기준
-      for (const skuId of directSkuIds) {
-        const qty = invDirect[skuId];
-        if (skuId.startsWith('26UN-') && skuId.includes('_')) continue; // 완제품은 B에서 처리
-        const info = skuNameMap[skuId];
-        itemMap[skuId] = {
-          finishedSkuId: skuId,
-          skuName: info?.name || skuId,
-          barcode: info?.barcode || null,
-          availableQty: qty,
-          shipQty: 0,
-          inventoryQty: qty,
-          isShortage: false,
-          needsMarking: false,
-        };
-      }
+        const allShipSkuIds = [...new Set([...directSkuIds, ...finishedSkuIds])];
+        const missingNameSkus = allShipSkuIds.filter(s => !skuNameMap[s]);
+        if (missingNameSkus.length > 0) {
+          const { data: skuInfos } = await supabase.from('sku').select('sku_id, sku_name, barcode').in('sku_id', missingNameSkus);
+          for (const s of (skuInfos || []) as any[]) skuNameMap[s.sku_id] = { name: s.sku_name, barcode: s.barcode };
+        }
 
-      // B. 마킹 완성품: 플레이위즈 재고 (완제품 SKU 패턴)
-      for (const skuId of finishedSkuIds) {
-        if (itemMap[skuId]) continue;
-        const qty = inventoryMap[skuId];
-        const info = skuNameMap[skuId];
+        for (const skuId of directSkuIds) {
+          const qty = invDirect[skuId];
+          if (skuId.startsWith('26UN-') && skuId.includes('_')) continue;
+          const info = skuNameMap[skuId];
+          itemMap[skuId] = {
+            finishedSkuId: skuId, skuName: info?.name || skuId, barcode: info?.barcode || null,
+            availableQty: qty, shipQty: 0, inventoryQty: qty, isShortage: false, needsMarking: false,
+          };
+        }
+
+        for (const skuId of finishedSkuIds) {
+          if (itemMap[skuId]) continue;
+          const qty = inventoryMap[skuId];
+          const info = skuNameMap[skuId];
         itemMap[skuId] = {
           finishedSkuId: skuId,
           skuName: info?.name || skuId,
@@ -233,6 +276,7 @@ export default function ShipmentOut({ currentUser }: { currentUser: AppUser }) {
           isShortage: false,
           needsMarking: true,
         };
+        }
       }
 
       // 이전 출고분 차감 후 출고 가능 수량 계산
@@ -894,8 +938,38 @@ export default function ShipmentOut({ currentUser }: { currentUser: AppUser }) {
       {/* 품목 카드 — 완성품/단품 2컬럼 */}
       <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
         <div className="px-5 py-4 border-b border-gray-50">
-          <h3 className="font-medium text-gray-900">CJ 물류센터로 보낼 물량</h3>
-          <p className="text-sm text-gray-500 mt-0.5">{selectedWo?.download_date} 기준</p>
+          <div className="flex items-center justify-between">
+            <div>
+              <h3 className="font-medium text-gray-900">CJ 물류센터로 보낼 물량</h3>
+              <p className="text-sm text-gray-500 mt-0.5">{selectedWo?.download_date} 기준</p>
+            </div>
+            {receiptWaves.length > 1 && (
+              <select
+                value={selectedWave ?? 'all'}
+                onChange={async (e) => {
+                  const val = e.target.value;
+                  const wave = val === 'all' ? null : Number(val);
+                  setSelectedWave(wave);
+                  // selectOrder 내부에서 selectedWave state 대신 직접 전달 필요
+                  // → 페이지 리로드로 처리
+                  if (selectedWo) {
+                    setItems([]);
+                    setUploadComparison(null);
+                    // selectedWave가 업데이트된 후 selectOrder 호출을 위해 setTimeout 사용
+                    setTimeout(() => { if (selectedWo) selectOrder(selectedWo); }, 0);
+                  }
+                }}
+                className="text-sm border border-gray-300 rounded-lg px-3 py-1.5 bg-white"
+              >
+                <option value="all">전체 입고</option>
+                {receiptWaves.map((w) => (
+                  <option key={w.wave} value={w.wave}>
+                    {w.wave}차 입고 ({w.date}) — {w.totalQty}개
+                  </option>
+                ))}
+              </select>
+            )}
+          </div>
         </div>
 
         {/* 총 수량 합계 (예정 / 실적) */}
