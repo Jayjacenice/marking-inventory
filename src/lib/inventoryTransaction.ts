@@ -225,21 +225,27 @@ export async function deleteCjTransactions(params: {
   startDate: string;
   endDate: string;
 }): Promise<{ deleted: number; error: string | null }> {
-  // 1) 삭제 대상 트랜잭션 조회 (inventory 역반영용)
-  const { data: txToDelete, error: fetchErr } = await supabaseAdmin
-    .from('inventory_transaction')
-    .select('sku_id, tx_type, quantity, needs_marking')
-    .eq('source', 'cj_excel')
-    .eq('warehouse_id', params.warehouseId)
-    .eq('tx_type', params.txType)
-    .gte('tx_date', params.startDate)
-    .lte('tx_date', params.endDate);
-
-  if (fetchErr) {
-    return { deleted: 0, error: fetchErr.message };
+  // 1) 삭제 대상 트랜잭션 조회 (페이지네이션으로 전체 조회 — 1,000건 제한 우회)
+  const txToDelete: { sku_id: string; tx_type: string; quantity: number; needs_marking: boolean | null }[] = [];
+  let offset = 0;
+  while (true) {
+    const { data: page, error: fetchErr } = await supabaseAdmin
+      .from('inventory_transaction')
+      .select('sku_id, tx_type, quantity, needs_marking')
+      .eq('source', 'cj_excel')
+      .eq('warehouse_id', params.warehouseId)
+      .eq('tx_type', params.txType)
+      .gte('tx_date', params.startDate)
+      .lte('tx_date', params.endDate)
+      .range(offset, offset + 999);
+    if (fetchErr) return { deleted: 0, error: fetchErr.message };
+    if (!page || page.length === 0) break;
+    txToDelete.push(...page);
+    if (page.length < 1000) break;
+    offset += 1000;
   }
 
-  const deleteCount = txToDelete?.length || 0;
+  const deleteCount = txToDelete.length;
   if (deleteCount === 0) {
     return { deleted: 0, error: null };
   }

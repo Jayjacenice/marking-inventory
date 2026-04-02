@@ -85,14 +85,23 @@ export default function StockLedger() {
     const cjWh = warehouses.find((w) => w.name.includes('CJ') || w.name.includes('cj'));
     if (!cjWh) return;
     try {
-      const { data } = await supabase
-        .from('inventory_transaction')
-        .select('tx_type, tx_date')
-        .eq('source', 'cj_excel')
-        .eq('warehouse_id', cjWh.id);
-      if (!data) return;
+      // 페이지네이션으로 전체 조회 (1,000건 제한 우회)
+      const allRows: { tx_type: string; tx_date: string }[] = [];
+      let offset = 0;
+      while (true) {
+        const { data } = await supabase
+          .from('inventory_transaction')
+          .select('tx_type, tx_date')
+          .eq('source', 'cj_excel')
+          .eq('warehouse_id', cjWh.id)
+          .range(offset, offset + 999);
+        if (!data || data.length === 0) break;
+        allRows.push(...data);
+        if (data.length < 1000) break;
+        offset += 1000;
+      }
       const status: Record<string, { maxDate: string; minDate: string; count: number }> = {};
-      for (const row of data) {
+      for (const row of allRows) {
         const type = row.tx_type as string;
         if (!status[type]) status[type] = { maxDate: '', minDate: '9999-99-99', count: 0 };
         status[type].count++;
