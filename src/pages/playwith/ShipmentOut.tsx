@@ -737,7 +737,6 @@ export default function ShipmentOut({ currentUser }: { currentUser: AppUser }) {
   }
 
   const isMarkingDone = selectedWo?.status === '마킹완료';
-  const isShipmentReady = selectedWo?.status === '마킹중' || selectedWo?.status === '마킹완료';
   const markingItems = items.filter((i) => i.needsMarking);
   const directItems = items.filter((i) => !i.needsMarking);
   const totalMarkingQty = markingItems.reduce((s, i) => s + i.shipQty, 0);
