@@ -12,7 +12,7 @@ if (!supabaseUrl || !supabaseAnonKey) {
  * Supabase의 모든 HTTP 요청(DB 쿼리, 토큰 갱신 등)에 적용되어
  * 네트워크 hang 시 Promise가 영원히 대기하지 않도록 보장한다.
  */
-const FETCH_TIMEOUT_MS = 10_000;
+const FETCH_TIMEOUT_MS = 30_000;
 
 const fetchWithTimeout = (
   input: RequestInfo | URL,
