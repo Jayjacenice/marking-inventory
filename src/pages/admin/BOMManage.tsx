@@ -8,9 +8,9 @@ import { Upload, Database, Trash2, AlertTriangle, CheckCircle, FileSpreadsheet, 
 interface BomEntry {
   id: string;
   finished_sku_id: string;
-  finished_sku: { sku_name: string } | null;
+  finished_sku: { sku_name: string; barcode: string | null } | null;
   component_sku_id: string;
-  component: { sku_name: string } | null;
+  component: { sku_name: string; barcode: string | null } | null;
   quantity: number;
 }
 
@@ -44,7 +44,7 @@ export default function BOMManage() {
         const { data, error } = await supabase
           .from('bom')
           .select(
-            'id, finished_sku_id, finished_sku:sku!bom_finished_sku_id_fkey(sku_name), component_sku_id, component:sku!bom_component_sku_id_fkey(sku_name), quantity'
+            'id, finished_sku_id, finished_sku:sku!bom_finished_sku_id_fkey(sku_name, barcode), component_sku_id, component:sku!bom_component_sku_id_fkey(sku_name, barcode), quantity'
           )
           .order('finished_sku_id')
           .range(offset, offset + PAGE_SIZE - 1);
@@ -343,16 +343,17 @@ export default function BOMManage() {
                     {items[0].finished_sku?.sku_name || finishedSkuId}
                   </p>
                   <p className="text-xs text-gray-500 font-mono">{finishedSkuId}</p>
+                  {items[0].finished_sku?.barcode && (
+                    <p className="text-xs text-gray-400 font-mono">{items[0].finished_sku.barcode}</p>
+                  )}
                 </div>
                 <table className="w-full text-sm">
                   <tbody>
                     {items.map((bom) => (
                       <tr key={bom.id} className="border-b border-gray-50 last:border-0 hover:bg-gray-50">
-                        <td className="px-4 py-2.5 text-gray-700">
-                          {bom.component?.sku_name || bom.component_sku_id}
-                        </td>
-                        <td className="px-4 py-2.5 text-gray-400 font-mono text-xs">
-                          {bom.component_sku_id}
+                        <td className="px-4 py-2.5">
+                          <p className="text-gray-700">{bom.component?.sku_name || bom.component_sku_id}</p>
+                          <p className="text-xs text-gray-400 font-mono">{bom.component_sku_id}{bom.component?.barcode ? ` · ${bom.component.barcode}` : ''}</p>
                         </td>
                         <td className="px-4 py-2.5 text-gray-900 font-medium text-right">
                           ×{bom.quantity}
