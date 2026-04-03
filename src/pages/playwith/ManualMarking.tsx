@@ -227,6 +227,7 @@ export default function ManualMarking({ currentUser }: { currentUser: AppUser })
                             <div className="flex-1 min-w-0 mr-3">
                               <p className="text-sm font-medium text-gray-800 truncate">{item.skuName}</p>
                               <p className="text-xs text-gray-400 font-mono">{item.finishedSkuId}</p>
+                              {item.barcode && <p className="text-xs text-gray-400 font-mono">{item.barcode}</p>}
                               <p className="text-xs text-gray-500 mt-0.5">요청: {item.qty}개</p>
                             </div>
                             <div className="flex items-center gap-1">
