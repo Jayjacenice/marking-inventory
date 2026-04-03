@@ -101,6 +101,7 @@ const navGroups: NavGroup[] = [
       { label: '입고 확인', path: '/playwith/receipt', icon: <PackageCheck size={18} />, roles: ['playwith'] },
       { label: '마킹 작업', path: '/playwith/marking', icon: <ClipboardList size={18} />, roles: ['playwith'] },
       { label: '출고 확인', path: '/playwith/shipment', icon: <Truck size={18} />, roles: ['playwith'] },
+      { label: '매장 이관', path: '/playwith/transfer', icon: <Package size={18} />, roles: ['playwith'] },
     ],
   },
 ];

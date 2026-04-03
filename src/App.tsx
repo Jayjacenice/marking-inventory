@@ -19,6 +19,7 @@ import ShipmentConfirm from './pages/offline/ShipmentConfirm';
 import ReceiptCheck from './pages/playwith/ReceiptCheck';
 import MarkingWork from './pages/playwith/MarkingWork';
 import ShipmentOut from './pages/playwith/ShipmentOut';
+import TransferToShop from './pages/playwith/TransferToShop';
 import ActivityHistory from './pages/admin/ActivityHistory';
 import InventoryManage from './pages/admin/InventoryManage';
 import StockLedger from './pages/admin/StockLedger';
@@ -217,6 +218,7 @@ function AppContent() {
         <Route path="/playwith/receipt" element={<ReceiptCheck currentUser={user} />} />
         <Route path="/playwith/marking" element={<MarkingWork currentUser={user} />} />
         <Route path="/playwith/shipment" element={<ShipmentOut currentUser={user} />} />
+        <Route path="/playwith/transfer" element={<TransferToShop currentUser={user} />} />
 
         {/* 기본 리다이렉트 */}
         <Route
