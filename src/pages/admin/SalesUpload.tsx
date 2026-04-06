@@ -41,6 +41,31 @@ function excelDateToStr(serial: number): string {
   return d.toISOString().slice(0, 10);
 }
 
+/** 셀 값이 날짜처럼 보이는지 판별 (Date 객체, Excel 시리얼, 날짜 문자열) */
+function isDateLike(val: unknown): boolean {
+  if (val instanceof Date) return true;
+  if (typeof val === 'number' && val > 40000 && val < 60000) return true;
+  if (typeof val === 'string') {
+    const s = val.trim();
+    if (/^\d{4}[-/]\d{1,2}[-/]\d{1,2}/.test(s)) return true;
+    if (/^\d{8}$/.test(s)) return true;
+  }
+  return false;
+}
+
+/** 날짜 셀 값을 YYYY-MM-DD 문자열로 변환 */
+function parseDateValue(val: unknown): string {
+  if (val instanceof Date) return val.toISOString().slice(0, 10);
+  if (typeof val === 'number' && val > 40000) return excelDateToStr(val);
+  if (typeof val === 'string') {
+    const s = val.trim();
+    const m = s.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})/);
+    if (m) return `${m[1]}-${m[2].padStart(2, '0')}-${m[3].padStart(2, '0')}`;
+    if (/^\d{8}$/.test(s)) return `${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6, 8)}`;
+  }
+  return '';
+}
+
 export default function SalesUpload() {
   const isStale = useStaleGuard();
 
@@ -113,6 +138,8 @@ export default function SalesUpload() {
   // 매장판매일보 감지 상태
   const [isPosDaily, setIsPosDaily] = useState(false);
   const [posDailyStats, setPosDailyStats] = useState<{ total: number; filtered: number; saleCount: number; returnCount: number } | null>(null);
+  // 날짜별 포맷 감지 상태
+  const [isDateColumnFormat, setIsDateColumnFormat] = useState(false);
 
   // 엑셀 파싱 — 자동 감지: 매장판매일보(18컬럼) vs 기존(2/3컬럼)
   const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -125,6 +152,7 @@ export default function SalesUpload() {
     setParsedRows([]);
     setIsPosDaily(false);
     setPosDailyStats(null);
+    setIsDateColumnFormat(false);
 
     try {
       const buf = await file.arrayBuffer();
@@ -249,21 +277,34 @@ export default function SalesUpload() {
 
         if (!isStale()) setParsedRows(parsed);
       } else {
-        // ─── 기존 2/3컬럼 파싱 ───
+        // ─── 기존 2/3컬럼 파싱 (날짜별 포맷 포함) ───
         const startIdx = raw.length > 0 && typeof raw[0][0] === 'string' && isNaN(Number(raw[0][0])) ? 1 : 0;
 
-        const rows: { barcode: string; quantity: number; txType?: TxType; saleType?: string }[] = [];
+        // 날짜별 포맷 감지: 3컬럼 이상이고 첫 데이터행의 A열이 날짜
+        const firstDataRow = raw[startIdx];
+        const hasDateColumn = firstDataRow && firstDataRow.length >= 3 && isDateLike(firstDataRow[0]);
+        if (hasDateColumn) setIsDateColumnFormat(true);
+
+        const rows: { barcode: string; quantity: number; txType?: TxType; saleType?: string; saleDate?: string }[] = [];
         for (let i = startIdx; i < raw.length; i++) {
           const r = raw[i];
           if (!r || r.length === 0) continue;
 
           let barcode: string;
           let qty: number;
+          let rowDate: string | undefined;
 
-          if (r.length >= 3 && typeof r[0] === 'string' && isNaN(Number(r[0]))) {
+          if (hasDateColumn && r.length >= 3) {
+            // 날짜별 포맷: 날짜, 바코드, 수량
+            rowDate = parseDateValue(r[0]) || undefined;
+            barcode = String(r[1] || '').trim();
+            qty = Number(r[2]) || 0;
+          } else if (r.length >= 3 && typeof r[0] === 'string' && isNaN(Number(r[0]))) {
+            // 기존: 구분, 바코드, 수량
             barcode = String(r[1] || '').trim();
             qty = Number(r[2]) || 0;
           } else {
+            // 기존: 바코드, 수량
             barcode = String(r[0] || '').trim();
             qty = Number(r[1]) || 0;
           }
@@ -272,11 +313,11 @@ export default function SalesUpload() {
 
           // 판매 탭에서 음수 수량 → 반품으로 자동 전환
           if (qty < 0 && activeTab === '판매') {
-            rows.push({ barcode, quantity: Math.abs(qty), txType: '반품' as TxType, saleType: '반품' });
+            rows.push({ barcode, quantity: Math.abs(qty), txType: '반품' as TxType, saleType: '반품', saleDate: rowDate });
           } else if (qty < 0) {
             continue; // 다른 탭에서는 음수 무시
           } else {
-            rows.push({ barcode, quantity: qty });
+            rows.push({ barcode, quantity: qty, saleDate: rowDate });
           }
         }
 
@@ -330,6 +371,7 @@ export default function SalesUpload() {
             matched: !!match,
             txType: r.txType,
             saleType: r.saleType,
+            saleDate: r.saleDate,
           };
         });
 
@@ -468,8 +510,8 @@ export default function SalesUpload() {
             <h3 className={`text-sm font-semibold text-${tabColor}-700`}>{activeTabInfo.desc}</h3>
             <p className="text-xs text-gray-500 mt-1">
               {activeTab === '판매' || activeTab === '출고'
-                ? '엑셀 양식: 바코드+수량 (2/3컬럼) 또는 매장판매일보 (자동 감지)'
-                : '엑셀 양식: 바코드, 수량 (2컬럼) 또는 구분자, 바코드, 수량 (3컬럼)'}
+                ? '엑셀 양식: [바코드, 수량] · [날짜, 바코드, 수량] · 매장판매일보 (자동 감지)'
+                : '엑셀 양식: [바코드, 수량] · [구분, 바코드, 수량] · [날짜, 바코드, 수량]'}
             </p>
           </div>
           <div className="flex items-center gap-2">
@@ -511,7 +553,13 @@ export default function SalesUpload() {
               )}
             </div>
           )}
-          <div className={`grid ${isPosDaily ? 'grid-cols-4' : 'grid-cols-3'} gap-3 mb-4`}>
+          {/* 날짜별 포맷 안내 */}
+          {isDateColumnFormat && (
+            <div className="bg-white/70 rounded-lg px-3 py-2 mb-3 text-xs text-gray-600">
+              날짜별 포맷 감지 — 각 행의 날짜를 개별 인식합니다
+            </div>
+          )}
+          <div className={`grid ${isPosDaily || isDateColumnFormat ? 'grid-cols-4' : 'grid-cols-3'} gap-3 mb-4`}>
             <div className="bg-white rounded-lg p-3 border">
               <div className="text-xs text-gray-500">매칭 성공</div>
               <div className={`text-lg font-bold text-${tabColor}-700`}>{matchedRows.length}건</div>
@@ -540,6 +588,18 @@ export default function SalesUpload() {
                 </div>
               </div>
             )}
+            {isDateColumnFormat && (
+              <div className="bg-white rounded-lg p-3 border">
+                <div className="text-xs text-gray-500">날짜 범위</div>
+                <div className="text-sm font-bold text-gray-700">
+                  {(() => {
+                    const dates = [...new Set(parsedRows.map(r => r.saleDate).filter(Boolean))].sort() as string[];
+                    return dates.length > 1 ? `${dates[0]} ~ ${dates[dates.length - 1]}` : dates[0] || '-';
+                  })()}
+                </div>
+                <div className="text-xs text-gray-400">{new Set(parsedRows.map(r => r.saleDate).filter(Boolean)).size}일</div>
+              </div>
+            )}
           </div>
 
           {/* 상세 테이블 */}
@@ -553,6 +613,7 @@ export default function SalesUpload() {
                   <tr>
                     <th className="px-2 py-1 text-left">상태</th>
                     {isPosDaily && <th className="px-2 py-1 text-left">구분</th>}
+                    {isDateColumnFormat && <th className="px-2 py-1 text-left">날짜</th>}
                     <th className="px-2 py-1 text-left">{isPosDaily ? 'SKU코드' : '바코드'}</th>
                     <th className="px-2 py-1 text-left">SKU</th>
                     <th className="px-2 py-1 text-left">상품명</th>
@@ -571,6 +632,9 @@ export default function SalesUpload() {
                             r.saleType === '반품' ? 'bg-red-100 text-red-700' : 'bg-emerald-100 text-emerald-700'
                           }`}>{r.saleType || '판매'}</span>
                         </td>
+                      )}
+                      {isDateColumnFormat && (
+                        <td className="px-2 py-1 text-gray-600">{r.saleDate || '-'}</td>
                       )}
                       <td className="px-2 py-1 font-mono">{r.barcode}</td>
                       <td className="px-2 py-1 text-gray-500">{r.skuId || '-'}</td>
@@ -598,7 +662,9 @@ export default function SalesUpload() {
             >
               {uploading ? '저장 중...' : isPosDaily
                 ? `판매 ${matchedRows.filter((r) => r.saleType !== '반품').length}건 + 반품 ${matchedRows.filter((r) => r.saleType === '반품').length}건 저장`
-                : `${activeTabInfo.label} ${matchedRows.length}건 저장`}
+                : isDateColumnFormat
+                  ? `${activeTabInfo.label} ${matchedRows.length}건 저장 (${new Set(matchedRows.map(r => r.saleDate).filter(Boolean)).size}일)`
+                  : `${activeTabInfo.label} ${matchedRows.length}건 저장`}
             </button>
           </div>
         </div>
