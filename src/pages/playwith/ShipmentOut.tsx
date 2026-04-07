@@ -460,7 +460,7 @@ export default function ShipmentOut({ currentUser }: { currentUser: AppUser }) {
   };
 
   const handleConfirm = async () => {
-    if (!selectedWo) return;
+    if (!selectedWo || confirming) return;
     setConfirming(true);
     setConfirmProgress(null);
     setError(null);
@@ -557,11 +557,21 @@ export default function ShipmentOut({ currentUser }: { currentUser: AppUser }) {
         });
       } catch (logErr) { console.warn('Activity log failed:', logErr); }
 
-      setConfirmed(true);
-      loadPendingOrders();
-
-      // 슬랙 알림
+      // 슬랙 알림용 데이터 (items 초기화 전에 캡처)
       const shippedItems = items.filter((i) => i.shipQty > 0);
+
+      setConfirmed(true);
+      setItems([]); // 중복 출고 방지: 아이템 목록 즉시 초기화
+      setSelectedWo(null);
+      // 출고 완료 후 WO 목록만 갱신 (selectOrder 호출 방지 → confirmed 리셋 방지)
+      try {
+        const { data: refreshed } = await supabase
+          .from('work_order')
+          .select('id, download_date, status')
+          .in('status', ['입고확인완료', '마킹중', '마킹완료'])
+          .order('uploaded_at', { ascending: false });
+        setWorkOrders(refreshed || []);
+      } catch { /* 목록 갱신 실패는 무시 */ }
       notifySlack({
         action: '출고확인',
         user: currentUser.name || currentUser.email,
