@@ -164,6 +164,20 @@ function AppContent() {
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
+  const handleViewAsChange = (role: UserRole | null) => {
+    viewChangeRef.current = true;
+    setViewAs(role);
+  };
+
+  // viewAs 변경 후 navigate (state 업데이트 완료 후 실행 → race condition 방지)
+  useEffect(() => {
+    if (!viewChangeRef.current) return;
+    viewChangeRef.current = false;
+    if (viewAs === 'offline') navigate('/offline/shipment');
+    else if (viewAs === 'playwith') navigate('/playwith/receipt');
+    else navigate('/admin/dashboard');
+  }, [viewAs]); // eslint-disable-line react-hooks/exhaustive-deps
+
   if (loading) {
     return (
       <div className="min-h-screen bg-gray-100 flex items-center justify-center">
@@ -180,20 +194,6 @@ function AppContent() {
       </Routes>
     );
   }
-
-  const handleViewAsChange = (role: UserRole | null) => {
-    viewChangeRef.current = true;
-    setViewAs(role);
-  };
-
-  // viewAs 변경 후 navigate (state 업데이트 완료 후 실행 → race condition 방지)
-  useEffect(() => {
-    if (!viewChangeRef.current) return;
-    viewChangeRef.current = false;
-    if (viewAs === 'offline') navigate('/offline/shipment');
-    else if (viewAs === 'playwith') navigate('/playwith/receipt');
-    else navigate('/admin/dashboard');
-  }, [viewAs]);
 
   return (
     <Layout
