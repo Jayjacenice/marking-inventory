@@ -124,7 +124,6 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
     e.target.value = '';
     setMessage(null);
     setAutoCompleteOrders([]);
-    setRevertOrders([]);
     setSkipCount(0);
 
     try {
