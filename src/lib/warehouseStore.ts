@@ -17,14 +17,13 @@ export async function getWarehouses(): Promise<Warehouse[]> {
   if (warehouses) return warehouses;
   if (loadPromise) return loadPromise;
 
-  loadPromise = supabase
-    .from('warehouse')
-    .select('id, name')
-    .then(({ data }) => {
-      warehouses = data || [];
-      loadPromise = null;
-      return warehouses;
-    });
+  loadPromise = Promise.resolve(
+    supabase.from('warehouse').select('id, name')
+  ).then(({ data }) => {
+    warehouses = (data ?? []) as Warehouse[];
+    loadPromise = null;
+    return warehouses;
+  });
 
   return loadPromise;
 }
