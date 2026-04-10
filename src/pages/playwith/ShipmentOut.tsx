@@ -239,13 +239,22 @@ export default function ShipmentOut({ currentUser }: { currentUser: AppUser }) {
           }
         }
       } else {
-        // 전체: needs_marking=false 재고 기준
-        for (const [skuId, qty] of Object.entries(invDirect)) {
-          if (qty <= 0 || (skuId.startsWith('26UN-') && skuId.includes('_'))) continue;
+        // 전체: work_order_line 기준 — SKU별 received_qty 합산 후 이전 출고 차감
+        const directBySku: Record<string, number> = {};
+        for (const line of lineList) {
+          if (line.needs_marking !== false) continue;
+          directBySku[line.finished_sku_id] = (directBySku[line.finished_sku_id] || 0) + (line.received_qty || 0);
+        }
+        for (const [skuId, totalReceived] of Object.entries(directBySku)) {
+          if (totalReceived <= 0) continue;
+          const shipped = prevShippedDirect[skuId] || 0;
+          const available = totalReceived - shipped;
+          if (available <= 0) continue;
           const info = skuNameMap[skuId];
           itemMap[skuId] = {
             finishedSkuId: skuId, skuName: info?.name || skuId, barcode: info?.barcode || null,
-            availableQty: qty, shipQty: 0, inventoryQty: qty, isShortage: false, needsMarking: false,
+            availableQty: available, shipQty: 0, inventoryQty: invDirect[skuId] || 0,
+            isShortage: false, needsMarking: false,
           };
         }
       }
@@ -270,31 +279,23 @@ export default function ShipmentOut({ currentUser }: { currentUser: AppUser }) {
           }
         }
       } else {
-        // 전체: 완제품(26UN-*_*) 재고
-        const finishedSkuIds = Object.keys(inventoryMap)
-          .filter(skuId => (inventoryMap[skuId] || 0) > 0 && skuId.startsWith('26UN-') && skuId.includes('_'));
-
-        // SKU 이름 배치 조회
-        const missingNameSkus = finishedSkuIds.filter(s => !skuNameMap[s]);
-        if (missingNameSkus.length > 0) {
-          const { data: skuInfos } = await supabase.from('sku').select('sku_id, sku_name, barcode').in('sku_id', missingNameSkus);
-          for (const s of (skuInfos || []) as any[]) skuNameMap[s.sku_id] = { name: s.sku_name, barcode: s.barcode };
+        // 전체: work_order_line 기준 — SKU별 marked_qty 합산 후 이전 출고 차감
+        const markingBySku: Record<string, number> = {};
+        for (const line of lineList) {
+          if (line.needs_marking !== true) continue;
+          markingBySku[line.finished_sku_id] = (markingBySku[line.finished_sku_id] || 0) + (line.marked_qty || 0);
         }
-
-        for (const skuId of finishedSkuIds) {
-          if (itemMap[skuId]) continue;
-          const qty = inventoryMap[skuId];
+        for (const [skuId, totalMarked] of Object.entries(markingBySku)) {
+          if (totalMarked <= 0) continue;
+          const shipped = prevShippedMarking[skuId] || 0;
+          const available = totalMarked - shipped;
+          if (available <= 0) continue;
           const info = skuNameMap[skuId];
-        itemMap[skuId] = {
-          finishedSkuId: skuId,
-          skuName: info?.name || skuId,
-          barcode: info?.barcode || null,
-          availableQty: qty,
-          shipQty: 0,
-          inventoryQty: qty,
-          isShortage: false,
-          needsMarking: true,
-        };
+          itemMap[skuId] = {
+            finishedSkuId: skuId, skuName: info?.name || skuId, barcode: info?.barcode || null,
+            availableQty: available, shipQty: 0, inventoryQty: inventoryMap[skuId] || 0,
+            isShortage: false, needsMarking: true,
+          };
         }
       }
 
