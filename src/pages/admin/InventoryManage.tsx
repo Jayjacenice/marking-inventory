@@ -1,6 +1,6 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useMemo } from 'react';
 import { supabase } from '../../lib/supabase';
-import { getWarehouseId } from '../../lib/warehouseStore';
+import { getWarehouses } from '../../lib/warehouseStore';
 import { supabaseAdmin } from '../../lib/supabaseAdmin';
 import { useStaleGuard } from '../../hooks/useStaleGuard';
 import { useLoadingTimeout } from '../../hooks/useLoadingTimeout';
@@ -8,92 +8,127 @@ import { useReadOnly } from '../../contexts/ReadOnlyContext';
 import { recordTransaction } from '../../lib/inventoryTransaction';
 import * as XLSX from 'xlsx';
 import {
-  Search, Pencil, Check, X, Package, ClipboardList,
-  Upload, FileUp, AlertTriangle, ChevronDown, ChevronUp,
+  Search, Pencil, Check, X, Upload, FileUp, AlertTriangle,
+  ChevronDown, ChevronUp, Download,
 } from 'lucide-react';
 
-interface InventoryRow {
+interface RawInventory {
+  warehouse_id: string;
   sku_id: string;
   needs_marking: boolean;
   quantity: number;
-  sku: { sku_name: string; barcode: string | null } | null;
+}
+
+interface SkuInfo {
+  name: string;
+  barcode: string;
+  baseBarcode: string;
+}
+
+interface InventoryPivot {
+  skuId: string;               // 대표 SKU (그룹 키)
+  skuName: string;
+  barcode: string;
+  warehouses: Record<string, number>;  // warehouseId → 수량
+  total: number;
 }
 
 interface ParsedStockItem {
-  inputCode: string;       // 엑셀에서 읽은 원본 코드 (SKU코드 또는 바코드)
-  skuId: string | null;    // 매칭된 SKU ID
-  skuName: string;         // 상품명
-  newQty: number;          // 엑셀에 입력된 수량
-  currentQty: number;      // 현재 재고 수량
-  diff: number;            // 변동량 (newQty - currentQty)
-  matched: boolean;        // SKU 매칭 성공 여부
+  inputCode: string;
+  skuId: string | null;
+  skuName: string;
+  newQty: number;
+  currentQty: number;
+  diff: number;
+  matched: boolean;
 }
-
-const TABS = [
-  { key: 'offline', label: '오프라인샵', warehouseName: '오프라인샵', color: 'blue', icon: Package },
-  { key: 'playwith', label: '플레이위즈', warehouseName: '플레이위즈', color: 'purple', icon: ClipboardList },
-] as const;
-
-type TabKey = (typeof TABS)[number]['key'];
 
 export default function InventoryManage({ currentUserId }: { currentUserId: string }) {
   const isStale = useStaleGuard();
   const readOnly = useReadOnly();
-  const [activeTab, setActiveTab] = useState<TabKey>('offline');
-  const [warehouseId, setWarehouseId] = useState<string | null>(null);
-  const [rows, setRows] = useState<InventoryRow[]>([]);
+
+  const [warehouses, setWarehouses] = useState<{ id: string; name: string }[]>([]);
+  const [inventory, setInventory] = useState<RawInventory[]>([]);
+  const [skuLookup, setSkuLookup] = useState<Record<string, SkuInfo>>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   useLoadingTimeout(loading, setLoading, setError);
-  const [search, setSearch] = useState('');
 
-  // 인라인 수정 상태
-  const [editingSkuId, setEditingSkuId] = useState<string | null>(null);
+  const [search, setSearch] = useState('');
+  const [hideZero, setHideZero] = useState(true);
+
+  // 인라인 수정 상태 (키: `${skuId}|${warehouseId}`)
+  const [editingKey, setEditingKey] = useState<string | null>(null);
   const [editQty, setEditQty] = useState<number>(0);
   const [saving, setSaving] = useState(false);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
 
-  // 기초재고 업로드 상태
+  // 기초재고 업로드
   const [showUpload, setShowUpload] = useState(false);
+  const [uploadWhId, setUploadWhId] = useState<string>('');
   const [parsing, setParsing] = useState(false);
   const [parsedItems, setParsedItems] = useState<ParsedStockItem[]>([]);
   const [uploadDate, setUploadDate] = useState(new Date().toISOString().slice(0, 10));
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState<string | null>(null);
 
-  const currentTab = TABS.find((t) => t.key === activeTab)!;
-
-  // 탭 전환 시 창고 ID 조회 + 재고 로드
+  // 초기 로드
   useEffect(() => {
-    loadWarehouseAndInventory();
-  }, [activeTab]);
+    loadData();
+  }, []);
 
-  const loadWarehouseAndInventory = async () => {
+  const loadData = async () => {
     setLoading(true);
     setError(null);
-    setEditingSkuId(null);
+    setEditingKey(null);
     try {
-      const whId = await getWarehouseId(currentTab.warehouseName);
-      if (!whId) throw new Error(`${currentTab.warehouseName} 창고를 찾을 수 없습니다.`);
+      // 1. 창고 목록
+      const whList = await getWarehouses();
       if (isStale()) return;
-      setWarehouseId(whId);
+      setWarehouses(whList);
+      if (!uploadWhId && whList.length > 0) {
+        setUploadWhId(whList[0].id);
+      }
 
-      const { data, error: invErr } = await supabase
-        .from('inventory')
-        .select('sku_id, needs_marking, quantity, sku(sku_name, barcode)')
-        .eq('warehouse_id', whId)
-        .gt('quantity', 0)
-        .order('sku_id');
-      if (invErr) throw invErr;
+      // 2. inventory 전체 조회 (페이지네이션 우회)
+      const all: RawInventory[] = [];
+      let offset = 0;
+      while (true) {
+        const { data, error: invErr } = await supabase
+          .from('inventory')
+          .select('warehouse_id, sku_id, needs_marking, quantity')
+          .range(offset, offset + 999);
+        if (invErr) throw invErr;
+        if (!data || data.length === 0) break;
+        all.push(...(data as RawInventory[]));
+        if (data.length < 1000) break;
+        offset += 1000;
+      }
       if (isStale()) return;
-      setRows(
-        ((data || []) as any[]).map((r) => ({
-          sku_id: r.sku_id,
-          needs_marking: r.needs_marking ?? false,
-          quantity: r.quantity,
-          sku: Array.isArray(r.sku) ? r.sku[0] || null : r.sku,
-        }))
-      );
+      setInventory(all);
+
+      // 3. 관련 SKU 정보 조회
+      const allSkuIds = [...new Set(all.map((r) => r.sku_id))];
+      const lookup: Record<string, SkuInfo> = {};
+      for (let i = 0; i < allSkuIds.length; i += 500) {
+        const batch = allSkuIds.slice(i, i + 500);
+        const { data: skuData } = await supabase
+          .from('sku')
+          .select('sku_id, sku_name, barcode')
+          .in('sku_id', batch);
+        if (skuData) {
+          for (const s of skuData) {
+            const base = s.barcode ? s.barcode.split('_')[0] : '';
+            lookup[s.sku_id] = {
+              name: s.sku_name || s.sku_id,
+              barcode: s.barcode || '',
+              baseBarcode: base,
+            };
+          }
+        }
+      }
+      if (isStale()) return;
+      setSkuLookup(lookup);
     } catch (err: any) {
       setError(err.message || '데이터 조회 실패');
     } finally {
@@ -101,62 +136,90 @@ export default function InventoryManage({ currentUserId }: { currentUserId: stri
     }
   };
 
-  // 검색 필터
-  const filtered = rows.filter((r) => {
-    if (!search.trim()) return true;
-    const q = search.toLowerCase();
-    return (
-      r.sku_id.toLowerCase().includes(q) ||
-      (r.sku?.sku_name || '').toLowerCase().includes(q)
-    );
-  });
+  // 피벗: SKU별 창고별 수량 (needs_marking 전체 합산)
+  const pivotRows: InventoryPivot[] = useMemo(() => {
+    const map = new Map<string, InventoryPivot>();
 
-  const totalQty = filtered.reduce((s, r) => s + r.quantity, 0);
+    for (const r of inventory) {
+      const info = skuLookup[r.sku_id];
+      // 마킹 완성품(_선수명 접미사)은 개별 유지, 나머지는 sku_id 그대로 (inventory는 이미 sku_id별)
+      const key = r.sku_id;
+      if (!map.has(key)) {
+        map.set(key, {
+          skuId: r.sku_id,
+          skuName: info?.name || r.sku_id,
+          barcode: info?.barcode || '',
+          warehouses: {},
+          total: 0,
+        });
+      }
+      const row = map.get(key)!;
+      row.warehouses[r.warehouse_id] = (row.warehouses[r.warehouse_id] || 0) + r.quantity;
+      row.total += r.quantity;
+    }
+
+    return Array.from(map.values()).sort((a, b) => a.skuName.localeCompare(b.skuName));
+  }, [inventory, skuLookup]);
+
+  // 검색/필터
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return pivotRows.filter((r) => {
+      if (hideZero && r.total === 0) return false;
+      if (!q) return true;
+      return (
+        r.skuId.toLowerCase().includes(q) ||
+        r.skuName.toLowerCase().includes(q) ||
+        r.barcode.toLowerCase().includes(q)
+      );
+    });
+  }, [pivotRows, search, hideZero]);
 
   // 인라인 수정
-  const startEdit = (row: InventoryRow) => {
-    setEditingSkuId(row.sku_id);
-    setEditQty(row.quantity);
+  const startEdit = (skuId: string, whId: string, qty: number) => {
+    setEditingKey(`${skuId}|${whId}`);
+    setEditQty(qty);
     setSuccessMsg(null);
   };
 
-  const cancelEdit = () => {
-    setEditingSkuId(null);
-  };
+  const cancelEdit = () => { setEditingKey(null); };
 
-  const saveEdit = async (row: InventoryRow) => {
-    if (!warehouseId) return;
+  const saveEdit = async (skuId: string, whId: string, oldQty: number) => {
     if (editQty < 0) {
       setError('수량은 0 이상이어야 합니다.');
       return;
     }
-    if (editQty === row.quantity) {
-      setEditingSkuId(null);
+    if (editQty === oldQty) {
+      setEditingKey(null);
       return;
     }
 
     setSaving(true);
     setError(null);
     try {
-      const { error: updErr } = await supabase
+      // needs_marking=false(일반 재고) 기준으로 upsert
+      const { error: upErr } = await supabaseAdmin
         .from('inventory')
-        .update({ quantity: editQty })
-        .eq('warehouse_id', warehouseId)
-        .eq('sku_id', row.sku_id)
-        .eq('needs_marking', row.needs_marking);
-      if (updErr) throw updErr;
+        .upsert(
+          { warehouse_id: whId, sku_id: skuId, needs_marking: false, quantity: editQty },
+          { onConflict: 'warehouse_id,sku_id,needs_marking' }
+        );
+      if (upErr) throw upErr;
 
-      const diff = editQty - row.quantity;
+      const diff = editQty - oldQty;
       if (diff !== 0) {
         recordTransaction({
-          warehouseId: warehouseId!,
-          skuId: row.sku_id,
+          warehouseId: whId,
+          skuId: skuId,
           txType: '재고조정',
           quantity: diff,
           source: 'manual',
-          memo: `재고수정: ${row.quantity} → ${editQty}`,
+          memo: `재고수정: ${oldQty} → ${editQty}`,
         });
       }
+
+      const whName = warehouses.find((w) => w.id === whId)?.name || '';
+      const skuName = skuLookup[skuId]?.name || skuId;
 
       supabase.from('activity_log').insert({
         user_id: currentUserId,
@@ -164,23 +227,29 @@ export default function InventoryManage({ currentUserId }: { currentUserId: stri
         work_order_id: null,
         action_date: new Date().toISOString().split('T')[0],
         summary: {
-          warehouse: currentTab.warehouseName,
-          skuId: row.sku_id,
-          skuName: row.sku?.sku_name || '',
-          before: row.quantity,
+          warehouse: whName,
+          skuId,
+          skuName,
+          before: oldQty,
           after: editQty,
           items: [],
           totalQty: editQty,
         },
       }).then(({ error: logErr }) => { if (logErr) console.warn('activity_log insert failed:', logErr.message); });
 
-      setRows((prev) =>
-        editQty === 0
-          ? prev.filter((r) => !(r.sku_id === row.sku_id && r.needs_marking === row.needs_marking))
-          : prev.map((r) => (r.sku_id === row.sku_id && r.needs_marking === row.needs_marking ? { ...r, quantity: editQty } : r))
-      );
-      setEditingSkuId(null);
-      setSuccessMsg(`${row.sku?.sku_name || row.sku_id}: ${row.quantity} → ${editQty}개로 변경됨`);
+      // state 업데이트: inventory 배열 수정
+      setInventory((prev) => {
+        const idx = prev.findIndex((r) => r.sku_id === skuId && r.warehouse_id === whId && !r.needs_marking);
+        if (idx >= 0) {
+          const next = [...prev];
+          next[idx] = { ...next[idx], quantity: editQty };
+          return next;
+        } else {
+          return [...prev, { warehouse_id: whId, sku_id: skuId, needs_marking: false, quantity: editQty }];
+        }
+      });
+      setEditingKey(null);
+      setSuccessMsg(`${skuName} @ ${whName}: ${oldQty} → ${editQty}개로 변경됨`);
     } catch (err: any) {
       setError(`수정 실패: ${err.message}`);
     } finally {
@@ -188,11 +257,26 @@ export default function InventoryManage({ currentUserId }: { currentUserId: stri
     }
   };
 
-  // ── 기초재고 업로드 ──
+  // 엑셀 다운로드
+  const handleDownload = () => {
+    const header = ['SKU ID', '상품명', '바코드', ...warehouses.map((w) => w.name), '합계'];
+    const rows = filtered.map((r) => [
+      r.skuId,
+      r.skuName,
+      r.barcode,
+      ...warehouses.map((w) => r.warehouses[w.id] || 0),
+      r.total,
+    ]);
+    const ws = XLSX.utils.aoa_to_sheet([header, ...rows]);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, '재고현황');
+    XLSX.writeFile(wb, `재고현황_${new Date().toISOString().slice(0, 10)}.xlsx`);
+  };
 
+  // 기초재고 업로드
   const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (!file || !warehouseId) return;
+    if (!file || !uploadWhId) return;
     e.target.value = '';
 
     setParsing(true);
@@ -211,7 +295,6 @@ export default function InventoryManage({ currentUserId }: { currentUserId: stri
         return;
       }
 
-      // 첫 행은 헤더로 건너뛰고 데이터 파싱
       const dataRows = rawRows.slice(1).filter((r: any[]) => r[0] && r[1] !== undefined && r[1] !== '');
       if (dataRows.length === 0) {
         setError('유효한 데이터가 없습니다. A열: SKU코드 또는 바코드, B열: 수량');
@@ -219,14 +302,11 @@ export default function InventoryManage({ currentUserId }: { currentUserId: stri
         return;
       }
 
-      // SKU 전체 목록 조회 (바코드 매칭용)
+      // SKU 전체 목록
       const allSkus: { sku_id: string; sku_name: string; barcode: string | null }[] = [];
       let from = 0;
       while (true) {
-        const { data } = await supabaseAdmin
-          .from('sku')
-          .select('sku_id, sku_name, barcode')
-          .range(from, from + 999);
+        const { data } = await supabaseAdmin.from('sku').select('sku_id, sku_name, barcode').range(from, from + 999);
         if (!data || data.length === 0) break;
         allSkus.push(...data);
         if (data.length < 1000) break;
@@ -235,33 +315,23 @@ export default function InventoryManage({ currentUserId }: { currentUserId: stri
 
       const skuById = new Map(allSkus.map((s) => [s.sku_id, s]));
       const skuByBarcode = new Map<string, typeof allSkus[0]>();
-      for (const s of allSkus) {
-        if (s.barcode) skuByBarcode.set(s.barcode, s);
-      }
+      for (const s of allSkus) if (s.barcode) skuByBarcode.set(s.barcode, s);
 
-      // 현재 재고 조회 (needs_marking 전체 합산)
-      const { data: currentInv } = await supabase
-        .from('inventory')
-        .select('sku_id, quantity')
-        .eq('warehouse_id', warehouseId);
+      // 해당 창고 현재 재고
       const currentQtyMap = new Map<string, number>();
-      for (const r of (currentInv || []) as any[]) {
-        currentQtyMap.set(r.sku_id, (currentQtyMap.get(r.sku_id) || 0) + (r.quantity as number));
+      for (const r of inventory) {
+        if (r.warehouse_id === uploadWhId) {
+          currentQtyMap.set(r.sku_id, (currentQtyMap.get(r.sku_id) || 0) + r.quantity);
+        }
       }
 
-      // 엑셀 데이터 매칭
       const items: ParsedStockItem[] = [];
       for (const row of dataRows) {
         const inputCode = String(row[0]).trim();
         const qty = Math.max(0, parseInt(row[1]) || 0);
-
-        // SKU ID로 직접 매칭 시도
         let sku = skuById.get(inputCode);
-        // 바코드로 매칭 시도
         if (!sku) sku = skuByBarcode.get(inputCode);
-
         const currentQty = sku ? (currentQtyMap.get(sku.sku_id) || 0) : 0;
-
         items.push({
           inputCode,
           skuId: sku?.sku_id || null,
@@ -287,10 +357,10 @@ export default function InventoryManage({ currentUserId }: { currentUserId: stri
   const changedItems = matchedItems.filter((i) => i.diff !== 0);
 
   const handleApplyStock = async () => {
-    if (!warehouseId || changedItems.length === 0) return;
-
+    if (!uploadWhId || changedItems.length === 0) return;
+    const whName = warehouses.find((w) => w.id === uploadWhId)?.name || '';
     const ok = window.confirm(
-      `${uploadDate} 기준으로 ${changedItems.length}종의 기초재고를 반영합니다.\n변동 없는 ${matchedItems.length - changedItems.length}종은 건너뜁니다.\n\n진행하시겠습니까?`
+      `${uploadDate} 기준 ${whName} 창고에 ${changedItems.length}종의 기초재고를 반영합니다.\n변동 없는 ${matchedItems.length - changedItems.length}종은 건너뜁니다.\n\n진행하시겠습니까?`
     );
     if (!ok) return;
 
@@ -305,22 +375,19 @@ export default function InventoryManage({ currentUserId }: { currentUserId: stri
       for (let i = 0; i < changedItems.length; i += 50) {
         const batch = changedItems.slice(i, i + 50);
 
-        // inventory upsert (needs_marking=false for base stock)
         const upsertRows = batch.map((item) => ({
-          warehouse_id: warehouseId,
+          warehouse_id: uploadWhId,
           sku_id: item.skuId!,
           needs_marking: false,
           quantity: item.newQty,
         }));
-
         const { error: upsertErr } = await supabaseAdmin
           .from('inventory')
           .upsert(upsertRows, { onConflict: 'warehouse_id,sku_id,needs_marking' });
         if (upsertErr) throw upsertErr;
 
-        // 수불부 트랜잭션 기록
         const txRows = batch.map((item) => ({
-          warehouse_id: warehouseId,
+          warehouse_id: uploadWhId,
           sku_id: item.skuId!,
           tx_type: '기초재고',
           quantity: item.newQty,
@@ -328,41 +395,31 @@ export default function InventoryManage({ currentUserId }: { currentUserId: stri
           tx_date: uploadDate,
           memo: `기초재고: ${item.newQty}`,
         }));
-
-        const { error: txErr } = await supabase
-          .from('inventory_transaction')
-          .insert(txRows);
-        if (txErr) console.error('기초재고 트랜잭션 기록 실패:', txErr);
+        await supabase.from('inventory_transaction').insert(txRows);
 
         success += batch.length;
         setUploadProgress(`재고 반영 중... ${success}/${total}`);
       }
 
-      // activity_log 기록
       supabase.from('activity_log').insert({
         user_id: currentUserId,
         action_type: 'inventory_adjust',
         work_order_id: null,
         action_date: uploadDate,
         summary: {
-          warehouse: currentTab.warehouseName,
+          warehouse: whName,
           type: '기초재고 업로드',
           date: uploadDate,
-          items: changedItems.slice(0, 10).map((i) => ({
-            skuId: i.skuId,
-            skuName: i.skuName,
-            before: i.currentQty,
-            after: i.newQty,
-          })),
+          items: changedItems.slice(0, 10).map((i) => ({ skuId: i.skuId, skuName: i.skuName, before: i.currentQty, after: i.newQty })),
           totalQty: changedItems.reduce((s, i) => s + i.newQty, 0),
           changedCount: changedItems.length,
         },
       }).then(({ error: logErr }) => { if (logErr) console.warn('activity_log insert failed:', logErr.message); });
 
-      setSuccessMsg(`기초재고 반영 완료: ${success}종 변경됨 (${uploadDate} 기준)`);
+      setSuccessMsg(`${whName} 창고 기초재고 반영 완료: ${success}종 변경됨 (${uploadDate} 기준)`);
       setParsedItems([]);
       setShowUpload(false);
-      loadWarehouseAndInventory();
+      loadData();
     } catch (err: any) {
       setError(`기초재고 반영 실패: ${err.message}`);
     } finally {
@@ -373,48 +430,31 @@ export default function InventoryManage({ currentUserId }: { currentUserId: stri
 
   return (
     <div className="space-y-5">
-      <h2 className="text-xl font-bold text-gray-900">재고 관리</h2>
-
-      {/* 탭 + 기초재고 버튼 */}
       <div className="flex items-center justify-between">
-        <div className="flex gap-2">
-          {TABS.map((tab) => {
-            const Icon = tab.icon;
-            const isActive = activeTab === tab.key;
-            const base =
-              tab.color === 'blue'
-                ? isActive
-                  ? 'bg-blue-600 text-white'
-                  : 'bg-white text-blue-600 border border-blue-200 hover:bg-blue-50'
-                : isActive
-                ? 'bg-purple-600 text-white'
-                : 'bg-white text-purple-600 border border-purple-200 hover:bg-purple-50';
-            return (
-              <button
-                key={tab.key}
-                onClick={() => setActiveTab(tab.key)}
-                className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold transition-colors ${base}`}
-              >
-                <Icon size={16} />
-                {tab.label}
-              </button>
-            );
-          })}
+        <h2 className="text-xl font-bold text-gray-900">재고 관리</h2>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={handleDownload}
+            disabled={filtered.length === 0}
+            className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs border border-gray-300 text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+            title="현재 뷰 엑셀 다운로드"
+          >
+            <Download size={14} /> 엑셀 다운로드
+          </button>
+          <button
+            onClick={() => { setShowUpload(!showUpload); setParsedItems([]); }}
+            disabled={readOnly}
+            className={`flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold transition-colors ${
+              showUpload
+                ? 'bg-amber-600 text-white'
+                : 'bg-white text-amber-600 border border-amber-200 hover:bg-amber-50'
+            } disabled:opacity-50`}
+          >
+            <Upload size={14} />
+            기초재고 업로드
+            {showUpload ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+          </button>
         </div>
-
-        <button
-          onClick={() => { setShowUpload(!showUpload); setParsedItems([]); }}
-          disabled={readOnly}
-          className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold transition-colors ${
-            showUpload
-              ? 'bg-amber-600 text-white'
-              : 'bg-white text-amber-600 border border-amber-200 hover:bg-amber-50'
-          } disabled:opacity-50 disabled:cursor-not-allowed`}
-        >
-          <Upload size={16} />
-          기초재고 업로드
-          {showUpload ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
-        </button>
       </div>
 
       {/* 기초재고 업로드 패널 */}
@@ -425,8 +465,19 @@ export default function InventoryManage({ currentUserId }: { currentUserId: stri
             A열: SKU코드 또는 바코드, B열: 수량 (첫 행은 헤더). 엑셀 수량으로 현재 재고를 덮어씁니다.
           </p>
 
-          {/* 날짜 선택 + 파일 선택 */}
           <div className="flex items-center gap-4 flex-wrap">
+            <div className="flex items-center gap-2">
+              <span className="text-sm text-amber-800 font-medium">창고:</span>
+              <select
+                value={uploadWhId}
+                onChange={(e) => setUploadWhId(e.target.value)}
+                className="border border-amber-300 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-amber-400"
+              >
+                {warehouses.map((w) => (
+                  <option key={w.id} value={w.id}>{w.name}</option>
+                ))}
+              </select>
+            </div>
             <div className="flex items-center gap-2">
               <span className="text-sm text-amber-800 font-medium">기준일:</span>
               <input
@@ -437,26 +488,18 @@ export default function InventoryManage({ currentUserId }: { currentUserId: stri
               />
             </div>
             <label className={`cursor-pointer inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
-              parsing || !warehouseId
+              parsing || !uploadWhId
                 ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
                 : 'bg-amber-600 text-white hover:bg-amber-700'
             }`}>
               <FileUp size={16} />
               {parsing ? '파싱 중...' : '엑셀 파일 선택'}
-              <input
-                type="file"
-                accept=".xls,.xlsx"
-                onChange={handleFileSelect}
-                disabled={readOnly || parsing || !warehouseId}
-                className="hidden"
-              />
+              <input type="file" accept=".xls,.xlsx" onChange={handleFileSelect} disabled={readOnly || parsing || !uploadWhId} className="hidden" />
             </label>
           </div>
 
-          {/* 파싱 결과 */}
           {parsedItems.length > 0 && (
             <div className="space-y-3">
-              {/* 요약 */}
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                 <div className="bg-white rounded-lg p-3 border border-amber-100">
                   <div className="text-xs text-gray-500">전체</div>
@@ -478,7 +521,6 @@ export default function InventoryManage({ currentUserId }: { currentUserId: stri
                 )}
               </div>
 
-              {/* 미매칭 경고 */}
               {unmatchedItems.length > 0 && (
                 <div className="bg-red-50 border border-red-200 rounded-lg p-3">
                   <div className="flex items-center gap-2 mb-2">
@@ -493,7 +535,6 @@ export default function InventoryManage({ currentUserId }: { currentUserId: stri
                 </div>
               )}
 
-              {/* 미리보기 테이블 */}
               <details open={changedItems.length <= 30}>
                 <summary className="cursor-pointer text-sm font-medium text-amber-800 mb-2">
                   변동 내역 상세 ({changedItems.length}건)
@@ -526,13 +567,8 @@ export default function InventoryManage({ currentUserId }: { currentUserId: stri
                 </div>
               </details>
 
-              {/* 적용 버튼 */}
               <div className="flex justify-end gap-2">
-                <button
-                  onClick={() => setParsedItems([])}
-                  className="px-4 py-2 rounded-lg text-sm border border-gray-300 hover:bg-gray-50"
-                  disabled={uploading}
-                >
+                <button onClick={() => setParsedItems([])} className="px-4 py-2 rounded-lg text-sm border border-gray-300 hover:bg-gray-50" disabled={uploading}>
                   취소
                 </button>
                 <button
@@ -540,9 +576,7 @@ export default function InventoryManage({ currentUserId }: { currentUserId: stri
                   disabled={readOnly || uploading || changedItems.length === 0}
                   className="bg-amber-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-amber-700 disabled:opacity-50"
                 >
-                  {uploading
-                    ? uploadProgress || '반영 중...'
-                    : `${changedItems.length}종 기초재고 반영 (${uploadDate})`}
+                  {uploading ? uploadProgress || '반영 중...' : `${changedItems.length}종 기초재고 반영 (${uploadDate})`}
                 </button>
               </div>
             </div>
@@ -555,9 +589,7 @@ export default function InventoryManage({ currentUserId }: { currentUserId: stri
         <div className="flex items-center gap-2 bg-green-50 border border-green-200 rounded-xl px-4 py-2.5">
           <Check size={14} className="text-green-600" />
           <span className="text-sm text-green-800">{successMsg}</span>
-          <button onClick={() => setSuccessMsg(null)} className="ml-auto text-xs text-green-600 underline">
-            닫기
-          </button>
+          <button onClick={() => setSuccessMsg(null)} className="ml-auto text-xs text-green-600 underline">닫기</button>
         </div>
       )}
 
@@ -565,26 +597,35 @@ export default function InventoryManage({ currentUserId }: { currentUserId: stri
       {error && (
         <div className="bg-red-50 border border-red-200 rounded-xl px-4 py-2.5">
           <p className="text-sm text-red-800">{error}</p>
-          <button onClick={loadWarehouseAndInventory} className="text-xs text-red-600 underline mt-1">
-            다시 시도
-          </button>
+          <button onClick={loadData} className="text-xs text-red-600 underline mt-1">다시 시도</button>
         </div>
       )}
 
-      {/* 검색 */}
-      <div className="relative">
-        <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
-        <input
-          type="text"
-          placeholder="SKU ID 또는 상품명 검색..."
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          className="w-full pl-10 pr-4 py-2.5 border border-gray-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-300 bg-white"
-        />
+      {/* 검색 + 필터 */}
+      <div className="flex items-center gap-3">
+        <div className="relative flex-1">
+          <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
+          <input
+            type="text"
+            placeholder="SKU ID / 상품명 / 바코드 검색..."
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            className="w-full pl-10 pr-4 py-2.5 border border-gray-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-300 bg-white"
+          />
+        </div>
+        <label className="flex items-center gap-2 text-sm text-gray-600 whitespace-nowrap">
+          <input
+            type="checkbox"
+            checked={hideZero}
+            onChange={(e) => setHideZero(e.target.checked)}
+            className="rounded border-gray-300"
+          />
+          0 재고 숨김
+        </label>
       </div>
 
-      {/* 데이터 갱신 중 표시 */}
-      {loading && rows.length > 0 && (
+      {/* 로딩 */}
+      {loading && inventory.length > 0 && (
         <div className="bg-blue-50 border border-blue-200 rounded-lg px-4 py-2 flex items-center gap-2">
           <div className="w-4 h-4 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
           <span className="text-sm text-blue-700">데이터 갱신 중...</span>
@@ -592,7 +633,7 @@ export default function InventoryManage({ currentUserId }: { currentUserId: stri
       )}
 
       {/* 테이블 */}
-      {loading && rows.length === 0 ? (
+      {loading && inventory.length === 0 ? (
         <div className="flex items-center justify-center h-40 text-gray-400">불러오는 중...</div>
       ) : filtered.length === 0 ? (
         <div className="bg-white rounded-xl p-8 text-center text-gray-400 shadow-sm border border-gray-100">
@@ -601,89 +642,88 @@ export default function InventoryManage({ currentUserId }: { currentUserId: stri
       ) : (
         <>
           <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
-            <table className="w-full text-sm">
-              <thead className={`border-b ${
-                currentTab.color === 'blue' ? 'bg-blue-50' : 'bg-purple-50'
-              }`}>
-                <tr>
-                  <th className="text-left px-4 py-3 font-medium text-gray-600">SKU ID</th>
-                  <th className="text-left px-4 py-3 font-medium text-gray-600">상품명</th>
-                  <th className="text-center px-4 py-3 font-medium text-gray-600">구분</th>
-                  <th className="text-right px-4 py-3 font-medium text-gray-600">수량</th>
-                  <th className="px-4 py-3 w-24" />
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-50">
-                {filtered.map((row) => (
-                  <tr key={`${row.sku_id}_${row.needs_marking}`} className="hover:bg-gray-50">
-                    <td className="px-4 py-3 text-gray-600 font-mono text-xs">{row.sku_id}</td>
-                    <td className="px-4 py-3 text-gray-900">{row.sku?.sku_name || '-'}</td>
-                    <td className="px-4 py-3 text-center">
-                      {row.needs_marking ? (
-                        <span className="inline-block px-2 py-0.5 text-xs font-medium rounded-full bg-purple-100 text-purple-700">마킹</span>
-                      ) : (
-                        <span className="inline-block px-2 py-0.5 text-xs font-medium rounded-full bg-gray-100 text-gray-600">일반</span>
-                      )}
-                    </td>
-                    <td className="px-4 py-3 text-right">
-                      {editingSkuId === row.sku_id ? (
-                        <input
-                          type="number"
-                          min={0}
-                          value={editQty}
-                          onChange={(e) => setEditQty(Math.max(0, parseInt(e.target.value) || 0))}
-                          onKeyDown={(e) => {
-                            if (e.key === 'Enter') saveEdit(row);
-                            if (e.key === 'Escape') cancelEdit();
-                          }}
-                          autoFocus
-                          className="w-20 text-right border border-blue-300 rounded-lg px-2 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400"
-                        />
-                      ) : (
-                        <span className="font-semibold text-gray-900">{row.quantity.toLocaleString()}</span>
-                      )}
-                    </td>
-                    <td className="px-4 py-3 text-right">
-                      {editingSkuId === row.sku_id ? (
-                        <div className="flex items-center justify-end gap-1">
-                          <button
-                            onClick={() => saveEdit(row)}
-                            disabled={readOnly || saving}
-                            className="p-1.5 text-green-600 hover:bg-green-50 rounded-lg disabled:opacity-50"
-                            title="저장"
-                          >
-                            <Check size={15} />
-                          </button>
-                          <button
-                            onClick={cancelEdit}
-                            disabled={saving}
-                            className="p-1.5 text-gray-400 hover:bg-gray-100 rounded-lg disabled:opacity-50"
-                            title="취소"
-                          >
-                            <X size={15} />
-                          </button>
-                        </div>
-                      ) : (
-                        <button
-                          onClick={() => startEdit(row)}
-                          disabled={readOnly}
-                          className="p-1.5 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors disabled:opacity-50"
-                          title="수정"
-                        >
-                          <Pencil size={14} />
-                        </button>
-                      )}
-                    </td>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead className="bg-gray-50 border-b">
+                  <tr>
+                    <th className="text-left px-4 py-3 font-medium text-gray-600 sticky left-0 bg-gray-50">상품명</th>
+                    <th className="text-left px-4 py-3 font-medium text-gray-600">바코드</th>
+                    {warehouses.map((w) => (
+                      <th key={w.id} className="text-right px-4 py-3 font-medium text-gray-600 whitespace-nowrap">
+                        {w.name}
+                      </th>
+                    ))}
+                    <th className="text-right px-4 py-3 font-medium text-gray-600 bg-blue-50">합계</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody className="divide-y divide-gray-50">
+                  {filtered.map((row) => (
+                    <tr key={row.skuId} className="hover:bg-gray-50">
+                      <td className="px-4 py-3 sticky left-0 bg-white hover:bg-gray-50">
+                        <div className="text-gray-900 font-medium max-w-[280px] truncate" title={row.skuName}>{row.skuName}</div>
+                        <div className="text-xs text-gray-400 font-mono">{row.skuId}</div>
+                      </td>
+                      <td className="px-4 py-3 text-xs text-gray-500 font-mono">{row.barcode || '-'}</td>
+                      {warehouses.map((w) => {
+                        const qty = row.warehouses[w.id] || 0;
+                        const key = `${row.skuId}|${w.id}`;
+                        const isEditing = editingKey === key;
+                        return (
+                          <td key={w.id} className="px-4 py-3 text-right">
+                            {isEditing ? (
+                              <div className="flex items-center justify-end gap-1">
+                                <input
+                                  type="number"
+                                  min={0}
+                                  value={editQty}
+                                  onChange={(e) => setEditQty(Math.max(0, parseInt(e.target.value) || 0))}
+                                  onKeyDown={(e) => {
+                                    if (e.key === 'Enter') saveEdit(row.skuId, w.id, qty);
+                                    if (e.key === 'Escape') cancelEdit();
+                                  }}
+                                  autoFocus
+                                  className="w-20 text-right border border-blue-300 rounded px-2 py-0.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400"
+                                />
+                                <button
+                                  onClick={() => saveEdit(row.skuId, w.id, qty)}
+                                  disabled={readOnly || saving}
+                                  className="p-1 text-green-600 hover:bg-green-50 rounded disabled:opacity-50"
+                                  title="저장"
+                                >
+                                  <Check size={13} />
+                                </button>
+                                <button onClick={cancelEdit} disabled={saving} className="p-1 text-gray-400 hover:bg-gray-100 rounded disabled:opacity-50" title="취소">
+                                  <X size={13} />
+                                </button>
+                              </div>
+                            ) : (
+                              <button
+                                onClick={() => !readOnly && startEdit(row.skuId, w.id, qty)}
+                                disabled={readOnly}
+                                className={`group inline-flex items-center gap-1 ${qty === 0 ? 'text-gray-300' : 'text-gray-900 font-semibold'} ${!readOnly ? 'hover:text-blue-600 hover:bg-blue-50 rounded px-2 py-0.5 -my-0.5 cursor-pointer' : 'cursor-default'} disabled:opacity-50`}
+                                title={readOnly ? '' : '클릭하여 수정'}
+                              >
+                                {qty.toLocaleString()}
+                                {!readOnly && <Pencil size={11} className="opacity-0 group-hover:opacity-100 transition-opacity" />}
+                              </button>
+                            )}
+                          </td>
+                        );
+                      })}
+                      <td className={`px-4 py-3 text-right font-bold bg-blue-50 ${row.total === 0 ? 'text-gray-300' : 'text-blue-700'}`}>
+                        {row.total.toLocaleString()}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           </div>
 
           {/* 합계 */}
           <div className="text-sm text-gray-500 text-right">
             총 <span className="font-semibold text-gray-700">{filtered.length}개</span> SKU ·{' '}
-            <span className="font-semibold text-gray-700">{totalQty.toLocaleString()}개</span>
+            <span className="font-semibold text-gray-700">{filtered.reduce((s, r) => s + r.total, 0).toLocaleString()}개</span>
           </div>
         </>
       )}
