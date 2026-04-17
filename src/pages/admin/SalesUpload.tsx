@@ -53,21 +53,6 @@ function excelDateToStr(serial: number): string {
   return d.toISOString().slice(0, 10);
 }
 
-/** 셀 값이 날짜처럼 보이는지 판별 */
-function isDateLike(val: unknown): boolean {
-  if (val instanceof Date) return true;
-  if (typeof val === 'number' && val > 40000 && val < 60000) return true;
-  if (typeof val === 'string') {
-    const s = val.trim();
-    if (/^\d{4}[-/]\d{1,2}[-/]\d{1,2}/.test(s)) return true;
-    if (/^\d{8}$/.test(s)) {
-      const num = Number(s);
-      return num >= 20000101 && num <= 20991231;
-    }
-  }
-  return false;
-}
-
 /** 날짜 셀 값을 YYYY-MM-DD 문자열로 변환 */
 function parseDateValue(val: unknown): string {
   if (val instanceof Date) return val.toISOString().slice(0, 10);

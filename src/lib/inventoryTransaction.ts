@@ -104,13 +104,19 @@ export async function validateTransactionBatch(
   return { valid: false, errors };
 }
 
-/** 재고 변동 여러건 일괄 기록 (CJ 엑셀 업로드용) */
+/** 재고 변동 여러건 일괄 기록 (CJ 엑셀 업로드용)
+ * @param options.allowNegative 음수 수량 허용 (재고조정 등). 기본 false — 음수 행 자동 제외
+ */
 export async function recordTransactionBatch(
   rows: RecordTxParams[],
   skuNameMap?: Map<string, string>,
-  onProgress?: (current: number, total: number) => void
+  onProgress?: (current: number, total: number) => void,
+  options?: { allowNegative?: boolean }
 ): Promise<{ success: number; failed: number }> {
-  const valid = rows.filter((r) => r.quantity > 0);
+  const allowNegative = options?.allowNegative ?? false;
+  const valid = allowNegative
+    ? rows.filter((r) => r.quantity !== 0)
+    : rows.filter((r) => r.quantity > 0);
   if (valid.length === 0) return { success: 0, failed: 0 };
 
   // 1) 없는 SKU 자동 등록
