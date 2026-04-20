@@ -118,15 +118,17 @@ export default function SalesUpload({ warehouseName = '오프라인' }: SalesUpl
     });
   }, []);
 
-  // 등록 현황 조회
+  // 등록 현황 조회 (이 화면에서 직접 등록한 건만 — memo 패턴으로 구분)
+  // 이동 자동 연계(`{창고} → {창고} 이동`)로 상대 창고에 생성된 건은 제외
   const fetchTxStatus = useCallback(async () => {
     if (!offlineWarehouse) return;
     try {
       const { data } = await supabase
         .from('inventory_transaction')
-        .select('tx_date, tx_type, quantity')
+        .select('tx_date, tx_type, quantity, memo')
         .eq('warehouse_id', offlineWarehouse.id)
         .eq('source', 'offline_manual')
+        .like('memo', '매장입출고:%')
         .order('tx_date', { ascending: false })
         .limit(5000);
       if (!data || isStale()) return;
@@ -556,7 +558,7 @@ export default function SalesUpload({ warehouseName = '오프라인' }: SalesUpl
     }
   };
 
-  // 삭제
+  // 삭제 (이 화면에서 직접 등록한 건만 — 이동 자동 연계 건은 상대 창고에 그대로 유지)
   const openDeleteModal = async (date: string, txType: string) => {
     if (!offlineWarehouse) return;
     const dbTxType = txType === '이동출고' ? '출고' : txType;
@@ -566,7 +568,8 @@ export default function SalesUpload({ warehouseName = '오프라인' }: SalesUpl
       .eq('warehouse_id', offlineWarehouse.id)
       .eq('source', 'offline_manual')
       .eq('tx_type', dbTxType)
-      .eq('tx_date', date);
+      .eq('tx_date', date)
+      .like('memo', '매장입출고:%');
     setDeleteModal({ date, txType, count: count || 0 });
     setDeleteConfirm(false);
   };
@@ -581,7 +584,8 @@ export default function SalesUpload({ warehouseName = '오프라인' }: SalesUpl
       .eq('warehouse_id', offlineWarehouse.id)
       .eq('source', 'offline_manual')
       .eq('tx_type', dbTxType)
-      .eq('tx_date', deleteModal.date);
+      .eq('tx_date', deleteModal.date)
+      .like('memo', '매장입출고:%');
     setDeleting(false);
     setDeleteModal(null);
     if (error) {
