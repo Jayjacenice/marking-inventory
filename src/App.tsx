@@ -218,6 +218,7 @@ function AppContent() {
         <Route path="/admin/users" element={<UserManage currentUser={user} />} />
         <Route path="/admin/history" element={<ActivityHistory />} />
         <Route path="/admin/sales" element={<SalesUpload />} />
+        <Route path="/admin/playwith-sales" element={<SalesUpload warehouseName="플레이위즈" />} />
         <Route path="/admin/tx-history" element={<TxHistory />} />
         <Route path="/admin/stock-ledger" element={<StockLedger />} />
         <Route path="/admin/sku-history" element={<SkuHistory />} />

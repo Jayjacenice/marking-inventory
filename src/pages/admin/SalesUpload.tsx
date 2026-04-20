@@ -66,9 +66,15 @@ function parseDateValue(val: unknown): string {
   return '';
 }
 
-export default function SalesUpload() {
+interface SalesUploadProps {
+  /** 기준 창고 이름 키워드 (기본 '오프라인' — '오프라인샵' 자동 감지). '플레이위즈' 전달 시 플레이위즈 창고 기준 */
+  warehouseName?: string;
+}
+
+export default function SalesUpload({ warehouseName = '오프라인' }: SalesUploadProps = {}) {
   const isStale = useStaleGuard();
   const readOnly = useReadOnly();
+  const isPlaywith = warehouseName.includes('플레이위즈');
 
   // 업로드 상태
   const [parsedRows, setParsedRows] = useState<ParsedRow[]>([]);
@@ -106,7 +112,7 @@ export default function SalesUpload() {
   useEffect(() => {
     getWarehouses().then((list) => {
       setWarehouses(list);
-      const wh = list.find((w) => w.name.includes('오프라인'));
+      const wh = list.find((w) => w.name.includes(warehouseName));
       if (wh) setOfflineWarehouse(wh);
       setWarehouseLoading(false);
     });
@@ -505,7 +511,7 @@ export default function SalesUpload() {
           quantity: r.quantity,
           source: 'offline_manual' as const,
           txDate: r.saleDate || txDate,
-          memo: `오프라인샵 → ${destName} 이동`,
+          memo: `${offlineWarehouse.name} → ${destName} 이동`,
         }));
 
       // 3. 이동입고 → 출처 창고에 '출고' 자동 생성
@@ -518,7 +524,7 @@ export default function SalesUpload() {
           quantity: r.quantity,
           source: 'offline_manual' as const,
           txDate: r.saleDate || txDate,
-          memo: `${sourceName} → 오프라인샵 이동`,
+          memo: `${sourceName} → ${offlineWarehouse.name} 이동`,
         }));
 
       const allTx = [...offlineTx, ...destInTx, ...sourceOutTx];
@@ -600,8 +606,8 @@ export default function SalesUpload() {
   const hasTransferOut = matchedRows.some((r) => r.txType === '출고');
   const hasTransferIn = matchedRows.some((r) => r.txType === '이동입고');
 
-  // 이동 창고 옵션: 오프라인샵 제외
-  const transferWhOptions = warehouses.filter((w) => !w.name.includes('오프라인'));
+  // 이동 창고 옵션: 현재 기준 창고 제외
+  const transferWhOptions = warehouses.filter((w) => !w.name.includes(warehouseName));
 
   // 등록 현황 필터링
   const filteredStatus = statusFilter === '전체'
@@ -614,7 +620,9 @@ export default function SalesUpload() {
       <div className="flex items-center justify-between mb-6">
         <div className="flex items-center gap-3">
           <Upload className="w-7 h-7 text-gray-700" />
-          <h1 className="text-2xl font-bold text-gray-900">매장 입/출고 등록</h1>
+          <h1 className="text-2xl font-bold text-gray-900">
+            {isPlaywith ? '플레이위즈 입/출고 등록' : '매장 입/출고 등록'}
+          </h1>
         </div>
         <button
           onClick={handleDownloadTemplate}
@@ -629,7 +637,7 @@ export default function SalesUpload() {
       {!warehouseLoading && !offlineWarehouse && (
         <div className="bg-red-50 border border-red-200 rounded-xl p-4 mb-4 text-sm text-red-700">
           <AlertTriangle className="w-4 h-4 inline mr-1" />
-          오프라인샵 창고를 찾을 수 없습니다.
+          {isPlaywith ? '플레이위즈' : '오프라인샵'} 창고를 찾을 수 없습니다.
         </div>
       )}
 
