@@ -25,6 +25,7 @@ import {
   ChevronDown,
   Settings,
   FileText,
+  History,
 } from 'lucide-react';
 
 interface NavItem {
@@ -73,6 +74,7 @@ const navGroups: NavGroup[] = [
       { label: 'CJ 입출고 관리', path: '/admin/cj-manage', icon: <Truck size={18} />, roles: ['admin', 'viewer'] },
       { label: '입/출고 현황', path: '/admin/tx-history', icon: <BarChart3 size={18} />, roles: ['admin', 'viewer'] },
       { label: '매장 입/출고 등록', path: '/admin/sales', icon: <ShoppingCart size={18} />, roles: ['admin', 'viewer'] },
+      { label: '품목별 재고 이력', path: '/admin/sku-history', icon: <History size={18} />, roles: ['admin', 'viewer'] },
     ],
   },
   {

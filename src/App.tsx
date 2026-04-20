@@ -24,6 +24,7 @@ import TransferToShop from './pages/playwith/TransferToShop';
 import ActivityHistory from './pages/admin/ActivityHistory';
 import InventoryManage from './pages/admin/InventoryManage';
 import StockLedger from './pages/admin/StockLedger';
+import SkuHistory from './pages/admin/SkuHistory';
 import CJManage from './pages/admin/CJManage';
 import SalesUpload from './pages/admin/SalesUpload';
 import TxHistory from './pages/admin/TxHistory';
@@ -219,6 +220,7 @@ function AppContent() {
         <Route path="/admin/sales" element={<SalesUpload />} />
         <Route path="/admin/tx-history" element={<TxHistory />} />
         <Route path="/admin/stock-ledger" element={<StockLedger />} />
+        <Route path="/admin/sku-history" element={<SkuHistory />} />
         <Route path="/admin/cj-manage" element={<CJManage />} />
         <Route path="/admin/sku-master" element={<SKUMaster currentUserId={user.id} />} />
         <Route path="/admin/orders" element={<OrderUpload currentUserId={user.id} />} />
