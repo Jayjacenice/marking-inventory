@@ -229,7 +229,6 @@ function AppContent() {
 
         {/* 오프라인 매장 */}
         <Route path="/offline/shipment" element={<ShipmentConfirm currentUser={user} />} />
-        <Route path="/offline/sales" element={<SalesUpload />} />
 
         {/* 플레이위즈 */}
         <Route path="/playwith/receipt" element={<ReceiptCheck currentUser={user} />} />
