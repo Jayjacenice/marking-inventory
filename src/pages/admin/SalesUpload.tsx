@@ -298,12 +298,13 @@ export default function SalesUpload() {
           return;
         }
 
-        // 헤더에서 컬럼 위치 찾기
-        const headers = (raw[0] || []).map((h) => String(h || '').trim());
-        const typeIdx = headers.findIndex((h) => h === '유형');
-        const dateIdx = headers.findIndex((h) => h === '날짜');
-        const barcodeIdx = headers.findIndex((h) => h === '바코드');
-        const qtyIdx = headers.findIndex((h) => h === '수량');
+        // 헤더에서 컬럼 위치 찾기 (다양한 이름 허용)
+        const headers = (raw[0] || []).map((h) => String(h || '').trim().toLowerCase());
+        const findIdx = (aliases: string[]) => headers.findIndex((h) => aliases.includes(h));
+        const typeIdx = findIdx(['유형', '구분', '종류', 'type']);
+        const dateIdx = findIdx(['날짜', '일자', 'date']);
+        const barcodeIdx = findIdx(['바코드', 'barcode', 'sku코드', 'sku', 'sku_id']);
+        const qtyIdx = findIdx(['수량', 'qty', 'quantity']);
 
         if (typeIdx < 0) {
           setUploadResult('엑셀에 "유형" 컬럼이 없습니다. 상단의 "양식 다운로드" 버튼으로 새 양식을 받아 사용해주세요.');
