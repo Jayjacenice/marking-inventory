@@ -94,6 +94,7 @@ const navGroups: NavGroup[] = [
     roles: ['offline'],
     items: [
       { label: '발송 확인', path: '/offline/shipment', icon: <PackageCheck size={18} />, roles: ['offline'] },
+      { label: '입/출고 등록', path: '/offline/sales', icon: <ShoppingCart size={18} />, roles: ['offline'] },
     ],
   },
   {
