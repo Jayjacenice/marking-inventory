@@ -7,6 +7,12 @@ import { useLoadingTimeout } from '../../hooks/useLoadingTimeout';
 import { useReadOnly } from '../../contexts/ReadOnlyContext';
 import { parseOrderExcel } from '../../lib/orderParser';
 import type { ParsedOrder } from '../../lib/orderParser';
+import { getLedgerInventory } from '../../lib/ledgerInventory';
+import {
+  analyzePlaysBasedOrders,
+  createPlaysWorkOrder,
+  type PlaysAnalysisResult,
+} from '../../lib/createPlaysWorkOrder';
 import type { OnlineOrder } from '../../types';
 import * as XLSX from 'xlsx';
 import {
@@ -69,6 +75,11 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
   // 작업지시서 생성
   const [creatingWo, setCreatingWo] = useState(false);
   const [woResult, setWoResult] = useState<string | null>(null);
+
+  // 플레이위즈 재고 기반 보완 WO
+  const [playsAnalyzing, setPlaysAnalyzing] = useState(false);
+  const [playsCreating, setPlaysCreating] = useState(false);
+  const [playsModal, setPlaysModal] = useState<PlaysAnalysisResult | null>(null);
 
   // 마킹 가능 주문 분석
   const [markingAnalysis, setMarkingAnalysis] = useState<{
@@ -606,19 +617,11 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
     setCreatingWo(true);
     setWoResult(null);
     try {
-      // ── 1단계: 오프라인 매장 재고 조회 ──
+      // ── 1단계: 오프라인 매장 재고 조회 (수불부 공식 기반) ──
+      // inventory 테이블의 Math.max 클램핑·비원자 upsert drift를 회피하기 위해
+      // inventory_transaction 누적으로 현재 잔량을 계산.
       const whId = await getWarehouseId('오프라인샵');
-      const invMap: Record<string, number> = {};
-      if (whId) {
-        let offset = 0;
-        while (true) {
-          const { data: inv } = await supabaseAdmin.from('inventory').select('sku_id, quantity').eq('warehouse_id', whId).range(offset, offset + 999);
-          if (!inv || inv.length === 0) break;
-          for (const r of inv) invMap[r.sku_id] = (invMap[r.sku_id] || 0) + r.quantity;
-          if (inv.length < 1000) break;
-          offset += 1000;
-        }
-      }
+      const invMap: Record<string, number> = whId ? await getLedgerInventory(whId) : {};
 
       // ── 1.5단계: BOM 조회 (마킹 완제품 → 구성품, 이후 차감에 사용) ──
       // 신규 주문 + 기존 작업지시서 라인 모두에서 마킹 완제품 SKU 수집
@@ -870,6 +873,38 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
     }
   };
 
+  // ── 플레이위즈 재고 기반 보완 WO ──
+  const handlePlaysAnalyze = async () => {
+    setPlaysAnalyzing(true);
+    try {
+      const result = await analyzePlaysBasedOrders();
+      setPlaysModal(result);
+    } catch (e: any) {
+      setMessage({ type: 'error', text: `플레이위즈 재고 분석 실패: ${e.message}` });
+    } finally {
+      setPlaysAnalyzing(false);
+    }
+  };
+
+  const handlePlaysCreate = async () => {
+    if (!playsModal) return;
+    if (playsModal.possibleOrders.length === 0) return;
+    setPlaysCreating(true);
+    try {
+      const out = await createPlaysWorkOrder(playsModal.possibleOrders, currentUserId);
+      setPlaysModal(null);
+      setWoResult(
+        `플레이위즈 재고 기반 작업지시서 생성 완료! ${out.lineCount}종 ${out.totalQty}개 (주문 ${out.orderCount}건 재할당)`,
+      );
+      setMessage({ type: 'success', text: '보완 작업지시서가 생성되었습니다. 마킹/출고 단계로 바로 진입합니다.' });
+      loadDashboard();
+    } catch (e: any) {
+      setMessage({ type: 'error', text: `보완 작업지시서 생성 실패: ${e.message}` });
+    } finally {
+      setPlaysCreating(false);
+    }
+  };
+
   // ── 마킹 가능 주문 분석 ──
   const analyzeMarkingPossible = async () => {
     setMarkingAnalysis({ loading: true, results: null, summary: null, analysisTime: null });
@@ -911,19 +946,9 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
         return;
       }
 
-      // 3. 플레이위즈 재고 조회
+      // 3. 플레이위즈 재고 조회 (수불부 공식 기반)
       const pwWhId = await getWarehouseId('플레이위즈');
-      const pwInvMap: Record<string, number> = {};
-      if (pwWhId) {
-        let offset = 0;
-        while (true) {
-          const { data: inv } = await supabaseAdmin.from('inventory').select('sku_id, quantity').eq('warehouse_id', pwWhId).range(offset, offset + 999);
-          if (!inv || inv.length === 0) break;
-          for (const r of inv) pwInvMap[r.sku_id] = (pwInvMap[r.sku_id] || 0) + r.quantity;
-          if (inv.length < 1000) break;
-          offset += 1000;
-        }
-      }
+      const pwInvMap: Record<string, number> = pwWhId ? await getLedgerInventory(pwWhId) : {};
 
       // 4. BOM 조회
       const finishedSkuIds = [...new Set(markingOrders.map(o => o.sku_id))];
@@ -1227,6 +1252,15 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
             >
               {creatingWo ? '생성 중...' : `작업지시서 생성 (${orders.filter(o => (o.status === '신규' || o.status === '재고부족') && !o.work_order_id).length}건)`}
             </button>
+            <button
+              onClick={handlePlaysAnalyze}
+              disabled={readOnly || playsAnalyzing}
+              className="px-4 py-1.5 bg-teal-600 text-white rounded-lg text-xs font-semibold hover:bg-teal-700 disabled:bg-gray-300 flex items-center gap-1"
+              title="플레이위즈 현재 재고로 처리 가능한 취소·재고부족·신규 주문을 별도 WO로 생성"
+            >
+              <Package size={13} />
+              {playsAnalyzing ? '분석 중...' : '플레이위즈 재고 기반 보완 WO'}
+            </button>
             <input
               type="date"
               value={deleteDate}
@@ -1494,6 +1528,130 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
               >
                 닫기
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 플레이위즈 재고 기반 보완 WO 미리보기 모달 */}
+      {playsModal && (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-xl shadow-xl max-w-3xl w-full max-h-[85vh] overflow-hidden flex flex-col">
+            <div className="px-5 py-3 border-b border-gray-100 flex items-center justify-between">
+              <div>
+                <h3 className="text-lg font-bold text-gray-900">플레이위즈 재고 기반 보완 WO</h3>
+                <p className="text-xs text-gray-500 mt-0.5">
+                  현재 플레이위즈 재고(수불부 기준) − 진행중 WO 예약분 = 가용. 완결 매칭되는 주문만 별도 WO로 생성.
+                </p>
+              </div>
+              <button onClick={() => setPlaysModal(null)} className="text-gray-400 hover:text-gray-600">
+                <X size={18} />
+              </button>
+            </div>
+
+            <div className="px-5 py-3 border-b border-gray-100 flex gap-4 text-sm">
+              <div className="flex-1 bg-green-50 border border-green-100 rounded-lg p-2.5">
+                <div className="text-xs text-green-700">가능 주문</div>
+                <div className="font-bold text-green-900">
+                  {playsModal.possibleOrders.length}건 · {playsModal.possibleOrders.reduce((s, p) => s + p.quantity, 0)}개
+                </div>
+              </div>
+              <div className="flex-1 bg-red-50 border border-red-100 rounded-lg p-2.5">
+                <div className="text-xs text-red-700">불가 주문 (BOM 불완전)</div>
+                <div className="font-bold text-red-900">
+                  {playsModal.impossibleOrders.length}건 · {playsModal.impossibleOrders.reduce((s, p) => s + p.quantity, 0)}개
+                </div>
+              </div>
+              <div className="flex-1 bg-blue-50 border border-blue-100 rounded-lg p-2.5">
+                <div className="text-xs text-blue-700">차감될 재고 SKU</div>
+                <div className="font-bold text-blue-900">{Object.keys(playsModal.consumedBySkuId).length}종</div>
+              </div>
+            </div>
+
+            <div className="flex-1 overflow-y-auto px-5 py-3 text-xs space-y-4">
+              {playsModal.possibleOrders.length > 0 && (
+                <div>
+                  <div className="text-xs font-semibold text-gray-600 mb-1.5">가능 주문 (상위 50건)</div>
+                  <div className="border border-green-200 rounded-lg overflow-hidden">
+                    <table className="w-full">
+                      <thead className="bg-green-50">
+                        <tr>
+                          <th className="text-left px-2 py-1.5 font-medium text-green-800">주문번호</th>
+                          <th className="text-left px-2 py-1.5 font-medium text-green-800">SKU</th>
+                          <th className="text-left px-2 py-1.5 font-medium text-green-800">상품명</th>
+                          <th className="text-right px-2 py-1.5 font-medium text-green-800">수량</th>
+                          <th className="text-center px-2 py-1.5 font-medium text-green-800">마킹</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-green-100">
+                        {playsModal.possibleOrders.slice(0, 50).map((p) => (
+                          <tr key={p.orderId}>
+                            <td className="px-2 py-1 font-mono">{p.orderNumber}</td>
+                            <td className="px-2 py-1 font-mono">{p.skuId}</td>
+                            <td className="px-2 py-1 truncate max-w-[240px]">{p.skuName}</td>
+                            <td className="px-2 py-1 text-right">{p.quantity}</td>
+                            <td className="px-2 py-1 text-center">{p.needsMarking ? '✓' : '-'}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  {playsModal.possibleOrders.length > 50 && (
+                    <div className="text-[11px] text-gray-400 mt-1">… 외 {playsModal.possibleOrders.length - 50}건</div>
+                  )}
+                </div>
+              )}
+
+              {playsModal.impossibleOrders.length > 0 && (
+                <div>
+                  <div className="text-xs font-semibold text-gray-600 mb-1.5">불가 주문 (상위 20건)</div>
+                  <div className="border border-red-200 rounded-lg overflow-hidden">
+                    <table className="w-full">
+                      <thead className="bg-red-50">
+                        <tr>
+                          <th className="text-left px-2 py-1.5 font-medium text-red-800">주문번호</th>
+                          <th className="text-left px-2 py-1.5 font-medium text-red-800">SKU</th>
+                          <th className="text-right px-2 py-1.5 font-medium text-red-800">수량</th>
+                          <th className="text-left px-2 py-1.5 font-medium text-red-800">부족 구성품</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-red-100">
+                        {playsModal.impossibleOrders.slice(0, 20).map((p) => (
+                          <tr key={p.orderId}>
+                            <td className="px-2 py-1 font-mono">{p.orderNumber}</td>
+                            <td className="px-2 py-1 font-mono">{p.skuId}</td>
+                            <td className="px-2 py-1 text-right">{p.quantity}</td>
+                            <td className="px-2 py-1 text-red-700">
+                              {p.missingComponents.map((m) => `${m.skuId}(${m.available}/${m.needed})`).join(', ')}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="px-5 py-3 border-t border-gray-100 flex items-center justify-between bg-gray-50">
+              <p className="text-xs text-gray-500">
+                생성 시 <strong>sent_qty = received_qty = ordered_qty</strong>, 이관·입고 단계 자동 완료. 재고 tx는 생성하지 않음.
+              </p>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => setPlaysModal(null)}
+                  className="px-3 py-1.5 bg-gray-100 text-gray-600 rounded-lg text-xs hover:bg-gray-200"
+                >
+                  취소
+                </button>
+                <button
+                  onClick={handlePlaysCreate}
+                  disabled={readOnly || playsCreating || playsModal.possibleOrders.length === 0}
+                  className="px-3 py-1.5 bg-teal-600 text-white rounded-lg text-xs font-semibold hover:bg-teal-700 disabled:bg-gray-300"
+                >
+                  {playsCreating ? '생성 중...' : `확인하여 보완 WO 생성 (${playsModal.possibleOrders.length}건)`}
+                </button>
+              </div>
             </div>
           </div>
         </div>

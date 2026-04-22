@@ -42,7 +42,6 @@ export default function TransferToShop({ currentUser }: { currentUser: AppUser }
         .from('inventory')
         .select('sku_id, quantity, needs_marking, sku(sku_name, barcode)')
         .eq('warehouse_id', whId)
-        .eq('needs_marking', false)
         .gt('quantity', 0)
         .order('sku_id');
 
@@ -65,6 +64,10 @@ export default function TransferToShop({ currentUser }: { currentUser: AppUser }
   };
 
   useEffect(() => { loadInventory(); }, []);
+
+  // 이관 가능 / 마킹 필요(이관 불가) 분리
+  const transferable = items.filter((i) => !i.needsMarking);
+  const markingNeeded = items.filter((i) => i.needsMarking);
 
   // 엑셀 업로드 (SKU + 수량)
   const handleExcelUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -97,9 +100,10 @@ export default function TransferToShop({ currentUser }: { currentUser: AppUser }
         if (key && qty > 0) uploadMap[key] = (uploadMap[key] || 0) + qty;
       }
 
-      // items에 매칭
+      // items에 매칭 (마킹필요 재고는 이관 불가 → 제외)
       setItems((prev) =>
         prev.map((item) => {
+          if (item.needsMarking) return item;
           const bySkuId = uploadMap[item.skuId] || 0;
           const byBarcode = (item.barcode && uploadMap[item.barcode]) || 0;
           const qty = bySkuId || byBarcode;
@@ -194,14 +198,13 @@ export default function TransferToShop({ currentUser }: { currentUser: AppUser }
   const activeItems = items.filter((i) => i.transferQty > 0);
   const totalTransfer = activeItems.reduce((s, i) => s + i.transferQty, 0);
 
-  const filtered = items.filter((i) => {
+  const matchesSearch = (i: TransferItem) => {
     if (!search.trim()) return true;
     const q = search.toLowerCase();
     return i.skuId.toLowerCase().includes(q) || i.skuName.toLowerCase().includes(q) || (i.barcode || '').toLowerCase().includes(q);
-  });
-
-  // needs_marking=false만 조회하므로 별도 그룹 분리 불필요
-  const directItems = filtered;
+  };
+  const directItems = transferable.filter(matchesSearch);
+  const markingNeededFiltered = markingNeeded.filter(matchesSearch);
 
   return (
     <div className="space-y-5 max-w-3xl">
@@ -277,6 +280,27 @@ export default function TransferToShop({ currentUser }: { currentUser: AppUser }
                             className="w-20 border border-gray-300 rounded-lg px-2 py-1.5 text-sm text-right focus:outline-none focus:ring-2 focus:ring-teal-500" />
                           <span className="text-xs text-gray-400">개</span>
                         </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* 마킹 필요 재고 — 이관 불가 (표시 전용) */}
+              {markingNeededFiltered.length > 0 && (
+                <div className="bg-white rounded-xl shadow-sm border border-amber-200 overflow-hidden">
+                  <div className="px-4 py-2.5 bg-amber-50 border-b border-amber-200">
+                    <p className="text-xs font-semibold text-amber-700">마킹 필요 재고 — 이관 불가 ({markingNeededFiltered.length}종)</p>
+                  </div>
+                  <div className="divide-y divide-gray-50 max-h-64 overflow-y-auto">
+                    {markingNeededFiltered.map((item) => (
+                      <div key={`${item.skuId}_${item.needsMarking}`} className="px-4 py-2.5 flex items-center justify-between">
+                        <div className="flex-1 min-w-0 mr-3">
+                          <p className="text-sm font-medium text-gray-800 truncate">{item.skuName}</p>
+                          <p className="text-xs text-gray-400 font-mono">{item.skuId}{item.barcode ? ` · ${item.barcode}` : ''}</p>
+                          <p className="text-xs text-amber-600">재고: {item.currentQty}</p>
+                        </div>
+                        <span className="text-xs text-amber-600 bg-amber-100 rounded-full px-2 py-0.5">마킹 필요</span>
                       </div>
                     ))}
                   </div>

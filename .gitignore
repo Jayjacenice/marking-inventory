@@ -24,3 +24,13 @@ dist-ssr
 *.sw?
 
 .vercel
+
+# Env files containing secrets
+.env
+.env.prod
+.env.vercel
+
+# Claude Code local state
+.claude/plan.md
+.claude/plans/
+.claude/settings.local.json

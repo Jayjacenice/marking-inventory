@@ -96,6 +96,8 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
   const [markingTab, setMarkingTab] = useState<'auto' | 'manual'>('auto');
   const [orders, setOrders] = useState<ActiveOrder[]>([]);
   const [selectedOrder, setSelectedOrder] = useState<ActiveOrder | null>(null);
+  // 플레이위즈 재고 기반 보완 WO(추가 작업) 마커
+  const [supplementaryWoIds, setSupplementaryWoIds] = useState<Set<string>>(new Set());
   const [items, setItems] = useState<MarkingItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [saved, setSaved] = useState(false);
@@ -176,6 +178,20 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
       if (isStale()) return;
       const list = (data || []) as ActiveOrder[];
       setOrders(list);
+      // 플레이위즈 재고 기반 보완 WO 마커 조회 (activity_log)
+      if (list.length > 0) {
+        const ids = list.map((w) => w.id);
+        const { data: markerLogs } = await supabase
+          .from('activity_log')
+          .select('work_order_id')
+          .eq('action_type', 'work_order_create_from_plays')
+          .in('work_order_id', ids);
+        if (!isStale()) {
+          setSupplementaryWoIds(new Set((markerLogs || []).map((l: any) => l.work_order_id)));
+        }
+      } else {
+        setSupplementaryWoIds(new Set());
+      }
       if (list.length > 0) selectOrder(list[0]);
       else setLoading(false);
     } catch (e: any) {
@@ -1999,7 +2015,14 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
               <div className="flex items-center gap-3">
                 {isExpanded ? <ChevronUp size={18} className="text-blue-600" /> : <ChevronDown size={18} className="text-gray-400" />}
                 <div className="text-left">
-                  <p className="text-sm font-semibold text-gray-900">{wo.download_date}</p>
+                  <div className="flex items-center gap-1.5">
+                    <p className="text-sm font-semibold text-gray-900">{wo.download_date}</p>
+                    {supplementaryWoIds.has(wo.id) && (
+                      <span className="text-[10px] font-medium bg-teal-100 text-teal-700 border border-teal-200 rounded-full px-2 py-0.5 leading-tight">
+                        추가 작업
+                      </span>
+                    )}
+                  </div>
                   {cached && <p className="text-xs text-gray-500 mt-0.5">{woItemCount}종</p>}
                 </div>
               </div>

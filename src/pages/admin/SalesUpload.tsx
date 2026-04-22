@@ -484,6 +484,15 @@ export default function SalesUpload({ warehouseName = '오프라인' }: SalesUpl
       setUploadResult('이동입고 행이 있습니다. 상단에서 "출처 창고"를 선택해주세요.');
       return;
     }
+    // 자가 이동 방지: 출처/받는 창고가 기준 창고와 동일하면 차단
+    if (hasTransferOut && transferDestId === offlineWarehouse.id) {
+      setUploadResult(`이동출고의 "받는 창고"가 ${offlineWarehouse.name}과 동일합니다. 다른 창고를 선택해주세요.`);
+      return;
+    }
+    if (hasTransferIn && transferSourceId === offlineWarehouse.id) {
+      setUploadResult(`이동입고의 "출처 창고"가 ${offlineWarehouse.name}과 동일합니다. 다른 창고를 선택해주세요.`);
+      return;
+    }
 
     setUploading(true);
     setUploadResult('저장 중...');
@@ -578,7 +587,10 @@ export default function SalesUpload({ warehouseName = '오프라인' }: SalesUpl
     if (!deleteModal || !offlineWarehouse) return;
     setDeleting(true);
     const dbTxType = deleteModal.txType === '이동출고' ? '출고' : deleteModal.txType;
-    const { error } = await supabase
+    const whName = offlineWarehouse.name;
+
+    // 1) primary 삭제
+    const { error: primaryErr } = await supabase
       .from('inventory_transaction')
       .delete()
       .eq('warehouse_id', offlineWarehouse.id)
@@ -586,12 +598,41 @@ export default function SalesUpload({ warehouseName = '오프라인' }: SalesUpl
       .eq('tx_type', dbTxType)
       .eq('tx_date', deleteModal.date)
       .like('memo', '매장입출고:%');
+
+    // 2) companion 삭제 (이동출고 ↔ 이동입고 쌍)
+    //    이동출고 primary → companion 이동입고 (memo: `{기준창고} → ? 이동`)
+    //    이동입고 primary → companion 출고   (memo: `? → {기준창고} 이동`)
+    let companionErr: { message: string } | null = null;
+    if (!primaryErr) {
+      if (dbTxType === '출고') {
+        const { error } = await supabase
+          .from('inventory_transaction')
+          .delete()
+          .eq('source', 'offline_manual')
+          .eq('tx_type', '이동입고')
+          .eq('tx_date', deleteModal.date)
+          .like('memo', `${whName} → % 이동`);
+        if (error) companionErr = error;
+      } else if (dbTxType === '이동입고') {
+        const { error } = await supabase
+          .from('inventory_transaction')
+          .delete()
+          .eq('source', 'offline_manual')
+          .eq('tx_type', '출고')
+          .eq('tx_date', deleteModal.date)
+          .like('memo', `% → ${whName} 이동`);
+        if (error) companionErr = error;
+      }
+    }
+
     setDeleting(false);
     setDeleteModal(null);
-    if (error) {
-      setUploadResult(`삭제 실패: ${error.message}`);
+    if (primaryErr) {
+      setUploadResult(`삭제 실패: ${primaryErr.message}`);
+    } else if (companionErr) {
+      setUploadResult(`primary 삭제 완료, 상대 창고 자동생성분 삭제 실패: ${companionErr.message}`);
     } else {
-      setUploadResult(`${deleteModal.date} ${deleteModal.txType} 데이터 삭제 완료`);
+      setUploadResult(`${deleteModal.date} ${deleteModal.txType} 데이터 삭제 완료 (상대 창고 자동생성분 포함)`);
     }
     fetchTxStatus();
   };

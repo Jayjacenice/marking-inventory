@@ -2,7 +2,10 @@ import { useEffect, useState } from 'react';
 import { useStaleGuard } from '../../hooks/useStaleGuard';
 import { useLoadingTimeout } from '../../hooks/useLoadingTimeout';
 import { supabase } from '../../lib/supabase';
+import { supabaseAdmin } from '../../lib/supabaseAdmin';
 import { getWarehouseId } from '../../lib/warehouseStore';
+import { recordTransactionBatch, type RecordTxParams } from '../../lib/inventoryTransaction';
+import { cancelOnlineOrdersLIFO } from '../../lib/orderCancel';
 import { Trash2, AlertTriangle, CheckCircle, XCircle, Eye, RotateCcw, Settings } from 'lucide-react';
 import { useReadOnly } from '../../contexts/ReadOnlyContext';
 import { CardSkeleton } from '../../components/LoadingSkeleton';
@@ -601,6 +604,102 @@ export default function Dashboard({ currentUser }: DashboardProps) {
     }
   };
 
+  // 작업 종료 시 플레이위즈의 마킹 스티커 잔여 재고를 재사용 가능 상태로 전환
+  // 모든 26MK-* needs_marking=true 재고 대상, 다른 진행중 WO의 예약분은 차감
+  const transitionResidualMarkingStickers = async (
+    excludeWoId: string,
+    woDateLabel: string,
+  ): Promise<{ transitioned: { skuId: string; qty: number }[] }> => {
+    const pwWhId = await getWarehouseId('플레이위즈');
+    if (!pwWhId) return { transitioned: [] };
+
+    // 1) 플레이위즈의 26MK-* needs_marking=true 잔여 재고 조회
+    const { data: residuals } = await supabaseAdmin
+      .from('inventory')
+      .select('sku_id, quantity')
+      .eq('warehouse_id', pwWhId)
+      .eq('needs_marking', true)
+      .gt('quantity', 0)
+      .like('sku_id', '26MK-%');
+
+    if (!residuals || residuals.length === 0) return { transitioned: [] };
+
+    // 2) 다른 진행중 WO의 마킹 예약분 산출
+    //    진행중 상태 = 이관준비/이관중/입고확인완료/마킹중/마킹완료 (제외: 현 WO)
+    const ACTIVE_STATUSES = ['이관준비', '이관중', '입고확인완료', '마킹중', '마킹완료'];
+    const { data: activeWos } = await supabase
+      .from('work_order')
+      .select('id')
+      .in('status', ACTIVE_STATUSES)
+      .neq('id', excludeWoId);
+    const activeWoIds = (activeWos || []).map((w: any) => w.id);
+
+    const reservedBySku: Record<string, number> = {};
+    if (activeWoIds.length > 0) {
+      const { data: activeLines } = await supabase
+        .from('work_order_line')
+        .select('finished_sku_id, received_qty, marked_qty, needs_marking')
+        .in('work_order_id', activeWoIds)
+        .eq('needs_marking', true);
+
+      const unmarkedByFinished: Record<string, number> = {};
+      for (const l of (activeLines || []) as any[]) {
+        const pending = Math.max(0, (l.received_qty || 0) - (l.marked_qty || 0));
+        if (pending === 0) continue;
+        unmarkedByFinished[l.finished_sku_id] = (unmarkedByFinished[l.finished_sku_id] || 0) + pending;
+      }
+
+      const finishedSkuIds = Object.keys(unmarkedByFinished);
+      if (finishedSkuIds.length > 0) {
+        const { data: bomRows } = await supabase
+          .from('bom')
+          .select('finished_sku_id, component_sku_id, quantity')
+          .in('finished_sku_id', finishedSkuIds);
+        for (const b of (bomRows || []) as any[]) {
+          if (!b.component_sku_id?.startsWith('26MK-')) continue;
+          const pending = unmarkedByFinished[b.finished_sku_id] || 0;
+          reservedBySku[b.component_sku_id] =
+            (reservedBySku[b.component_sku_id] || 0) + pending * (b.quantity || 0);
+        }
+      }
+    }
+
+    // 3) 전환 대상 계산: 잔여 - 예약 > 0
+    const txRows: RecordTxParams[] = [];
+    const transitioned: { skuId: string; qty: number }[] = [];
+    const memo = `작업종료 시 재사용 재고 전환 (WO ${woDateLabel})`;
+
+    for (const r of residuals as any[]) {
+      const reserved = reservedBySku[r.sku_id] || 0;
+      const toTransition = Math.max(0, (r.quantity || 0) - reserved);
+      if (toTransition === 0) continue;
+      txRows.push({
+        warehouseId: pwWhId,
+        skuId: r.sku_id,
+        txType: '재고조정',
+        quantity: -toTransition,
+        source: 'system',
+        needsMarking: true,
+        memo,
+      });
+      txRows.push({
+        warehouseId: pwWhId,
+        skuId: r.sku_id,
+        txType: '재고조정',
+        quantity: toTransition,
+        source: 'system',
+        needsMarking: false,
+        memo,
+      });
+      transitioned.push({ skuId: r.sku_id, qty: toTransition });
+    }
+
+    if (txRows.length > 0) {
+      await recordTransactionBatch(txRows, undefined, undefined, { allowNegative: true });
+    }
+    return { transitioned };
+  };
+
   const executeFinish = async () => {
     if (!finishModal || executingFinish || isStale()) return;
     setExecutingFinish(true);
@@ -611,6 +710,18 @@ export default function Dashboard({ currentUser }: DashboardProps) {
       if (rpcErr) throw rpcErr;
 
       const result = Array.isArray(rpcData) ? rpcData[0] : rpcData;
+
+      // 잔여 마킹 스티커 재사용 재고 전환 (RPC 성공 후 후처리)
+      let transitionResult: { transitioned: { skuId: string; qty: number }[] } = { transitioned: [] };
+      try {
+        transitionResult = await transitionResidualMarkingStickers(
+          finishModal.woId,
+          finishModal.woDate,
+        );
+      } catch (e: any) {
+        // 전환 실패해도 작업 종료 자체는 성공 — 경고만 남기고 진행
+        console.error('[finish] 잔여 스티커 전환 실패:', e);
+      }
 
       // activity_log 기록
       await supabase.from('activity_log').insert({
@@ -625,11 +736,18 @@ export default function Dashboard({ currentUser }: DashboardProps) {
           releasedOrders: result?.released_orders ?? finishModal.preview.releasedOrderCount,
           totalLines: result?.completed_lines ?? finishModal.preview.totalLineCount,
           reason: '관리자 작업 종료 (미발송분 분리)',
+          transitionedStickers: transitionResult.transitioned,
         },
       });
 
       setFinishModal(null);
-      setSuccessMsg(`작업지시서가 종료되었습니다. 미발송 주문 ${result?.released_orders ?? 0}건이 신규로 복귀됨.`);
+      const transitionedTotal = transitionResult.transitioned.reduce((s, t) => s + t.qty, 0);
+      const transitionMsg = transitionedTotal > 0
+        ? ` 마킹 스티커 ${transitionResult.transitioned.length}종 ${transitionedTotal}개가 재사용 재고로 전환됨.`
+        : '';
+      setSuccessMsg(
+        `작업지시서가 종료되었습니다. 미발송 주문 ${result?.released_orders ?? 0}건이 신규로 복귀됨.${transitionMsg}`,
+      );
       await loadData();
     } catch (e: any) {
       setError(`작업 종료 실패: ${e.message}`);
@@ -647,7 +765,19 @@ export default function Dashboard({ currentUser }: DashboardProps) {
         .rpc('zero_all_remaining', { p_work_order_id: zeroAllModal.woId });
       if (rpcErr) throw rpcErr;
 
-      // 2. activity_log 기록
+      // 2. LIFO로 해당 수량만큼 online_order status='취소' 처리
+      //    (이후 "플레이위즈 재고 기반 보완 WO" 기능이 이 취소 건을 재할당 대상으로 집음)
+      let cancelResults: Awaited<ReturnType<typeof cancelOnlineOrdersLIFO>> = [];
+      try {
+        cancelResults = await cancelOnlineOrdersLIFO(
+          zeroAllModal.woId,
+          zeroAllModal.lines.map((l) => ({ skuId: l.finishedSkuId, cancelQty: l.remaining })),
+        );
+      } catch (e: any) {
+        console.error('[zeroAll] online_order 취소 처리 실패:', e);
+      }
+
+      // 3. activity_log 기록
       await supabase.from('activity_log').insert({
         user_id: currentUser.id,
         action_type: 'zero_all_remaining',
@@ -662,11 +792,19 @@ export default function Dashboard({ currentUser }: DashboardProps) {
           })),
           totalQty: zeroAllModal.lines.reduce((s, l) => s + l.remaining, 0),
           reason: '관리자 남은 오더 일괄 0 처리',
+          cancelledOrders: cancelResults.map((r) => ({
+            skuId: r.skuId,
+            cancelledQty: r.cancelledQty,
+            cancelledOrderIds: r.cancelledOrderIds,
+            shortfall: r.shortfall,
+          })),
         },
       });
 
       setZeroAllModal(null);
-      setSuccessMsg(`남은 오더 ${updatedCount ?? zeroAllModal.lines.length}건이 0 처리되었습니다.`);
+      const totalCancelled = cancelResults.reduce((s, r) => s + r.cancelledOrderIds.length, 0);
+      const tail = totalCancelled > 0 ? ` (주문 ${totalCancelled}건 취소)` : '';
+      setSuccessMsg(`남은 오더 ${updatedCount ?? zeroAllModal.lines.length}건이 0 처리되었습니다.${tail}`);
       await loadData();
     } catch (e: any) {
       setError(`남은 오더 0 처리 실패: ${e.message}`);
