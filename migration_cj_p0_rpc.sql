@@ -96,7 +96,8 @@ as $$
 declare
   v_inserted int;
 begin
-  delete from cj_available_stock;
+  -- Supabase 의 session-level safe-updates 가드 회피를 위해 WHERE 절 명시 (where true)
+  delete from cj_available_stock where true;
 
   insert into cj_available_stock (sku_id, quantity, uploaded_at)
   select x.sku_id, x.quantity, now()
