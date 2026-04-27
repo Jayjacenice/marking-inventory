@@ -2,6 +2,7 @@ import { type ChangeEvent, useEffect, useRef, useState } from 'react';
 import { supabase } from '../../lib/supabase';
 import { getWarehouseId } from '../../lib/warehouseStore';
 import { recordTransaction, deleteSystemTransactions } from '../../lib/inventoryTransaction';
+import { getLedgerInventory } from '../../lib/ledgerInventory';
 import { useStaleGuard } from '../../hooks/useStaleGuard';
 import { useLoadingTimeout } from '../../hooks/useLoadingTimeout';
 import { AlertTriangle, CheckCircle, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Download, Edit3, FileUp, Trash2, Truck, XCircle } from 'lucide-react';
@@ -174,13 +175,11 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
         }
       }
 
-      // 오프라인 재고 조회 (발송 가능한 수량만 잔량에 포함)
+      // 오프라인 재고 조회 (수불부 누적 기반 — inventory 테이블 drift 회피)
       const offWhId = await getWarehouseId('오프라인샵');
-      const offlineInvMap: Record<string, number> = {};
-      if (offWhId) {
-        const { data: invData } = await supabase.from('inventory').select('sku_id, quantity').eq('warehouse_id', offWhId).eq('needs_marking', false);
-        for (const inv of (invData || []) as any[]) offlineInvMap[inv.sku_id] = inv.quantity;
-      }
+      const offlineInvMap: Record<string, number> = offWhId
+        ? await getLedgerInventory(offWhId, undefined, false)
+        : {};
 
       // BOM 상세 (구성품 SKU 매핑)
       const bomDetailMap: Record<string, { compSkuId: string; qty: number }[]> = {};
@@ -325,23 +324,18 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
         .filter((l: any) => l.needs_marking)
         .map((l: any) => l.finished_sku_id as string);
 
-      const [bomResult, invResult] = await Promise.all([
+      const [bomResult, ledgerInv] = await Promise.all([
         supabase.from('bom')
           .select('finished_sku_id, component_sku_id, quantity, component:sku!bom_component_sku_id_fkey(sku_id, sku_name, barcode)')
           .in('finished_sku_id', markingSkuIds.length > 0 ? markingSkuIds : ['__none__']),
-        supabase.from('inventory').select('sku_id, quantity').eq('warehouse_id', offlineWarehouseId).eq('needs_marking', false),
+        // 수불부 누적 기반 (inventory 테이블 drift 회피)
+        getLedgerInventory(offlineWarehouseId, undefined, false),
       ]);
       if (bomResult.error) throw bomResult.error;
-      if (invResult.error) throw invResult.error;
       if (isStale()) return;
 
       const bomData = bomResult.data;
-      const inventoryData = invResult.data;
-
-      const inventoryMap: Record<string, number> = {};
-      for (const inv of (inventoryData || []) as any[]) {
-        inventoryMap[inv.sku_id] = inv.quantity;
-      }
+      const inventoryMap: Record<string, number> = ledgerInv;
 
       const componentMap: Record<
         string,
