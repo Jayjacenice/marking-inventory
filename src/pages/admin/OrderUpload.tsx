@@ -621,7 +621,8 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
       // inventory 테이블의 Math.max 클램핑·비원자 upsert drift를 회피하기 위해
       // inventory_transaction 누적으로 현재 잔량을 계산.
       const whId = await getWarehouseId('오프라인샵');
-      const invMap: Record<string, number> = whId ? await getLedgerInventory(whId) : {};
+      // 매장 발송용 재고는 needs_marking=false 단품만 (ShipmentConfirm 와 동일 기준)
+      const invMap: Record<string, number> = whId ? await getLedgerInventory(whId, undefined, false) : {};
 
       // ── 1.5단계: BOM 조회 (마킹 완제품 → 구성품, 이후 차감에 사용) ──
       // 신규 주문 + 기존 작업지시서 라인 모두에서 마킹 완제품 SKU 수집
