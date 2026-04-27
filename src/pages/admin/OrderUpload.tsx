@@ -68,6 +68,7 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
   const [dashLoading, setDashLoading] = useState(true);
   useLoadingTimeout(dashLoading, setDashLoading);
   const [statusFilter, setStatusFilter] = useState('전체');
+  const [categoryFilter, setCategoryFilter] = useState<'전체' | '완제품' | '유니폼단품' | '마킹키트단품' | '기타'>('전체');
   const [searchText, setSearchText] = useState('');
 
   // 취소 (개별 라인)
@@ -148,9 +149,29 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
 
   const totalCount = orders.length;
 
+  // ── 카테고리 분류 (sku_id 패턴 기반) ──
+  // 완제품(마킹완제품): 26UN-*_선수명 형태
+  // 유니폼단품: 26UN-* (접미사 없음)
+  // 마킹키트단품: 26MK-* / 26MK2-*
+  // 기타: 그 외 (26AC, 26AP, 26CL 등)
+  const getOrderCategory = (skuId: string): '완제품' | '유니폼단품' | '마킹키트단품' | '기타' => {
+    if (!skuId) return '기타';
+    if (skuId.startsWith('26UN-') && skuId.includes('_')) return '완제품';
+    if (skuId.startsWith('26UN-')) return '유니폼단품';
+    if (/^26MK\d*-/.test(skuId)) return '마킹키트단품';
+    return '기타';
+  };
+
+  const categoryCounts = orders.reduce((acc, o) => {
+    const cat = getOrderCategory(o.sku_id);
+    acc[cat] = (acc[cat] || 0) + 1;
+    return acc;
+  }, {} as Record<string, number>);
+
   // ── 필터링 ──
   const filtered = orders.filter(o => {
     if (statusFilter !== '전체' && o.status !== statusFilter) return false;
+    if (categoryFilter !== '전체' && getOrderCategory(o.sku_id) !== categoryFilter) return false;
     if (searchText) {
       const q = searchText.toLowerCase();
       return o.order_number.includes(q) || (o.delivery_number || '').includes(q) || (o.sku_id || '').toLowerCase().includes(q) || (o.sku_name || '').toLowerCase().includes(q) || (o.option_text || '').toLowerCase().includes(q);
@@ -1573,7 +1594,7 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
         )}
 
         {/* 상태별 카드 */}
-        <div className="grid grid-cols-3 sm:grid-cols-7 gap-2 mb-4">
+        <div className="grid grid-cols-3 sm:grid-cols-7 gap-2 mb-3">
           {['신규', '발송대기', 'CJ대기', '이관중', '마킹중', '출고완료', '재고부족', '취소'].map(status => (
             <button
               key={status}
@@ -1586,6 +1607,28 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
               <p className="text-sm font-bold">{(statusCounts[status] || 0).toLocaleString()}</p>
             </button>
           ))}
+        </div>
+
+        {/* 카테고리 필터 */}
+        <div className="flex flex-wrap gap-2 mb-4">
+          <span className="text-xs text-gray-500 self-center">카테고리:</span>
+          {(['전체', '완제품', '유니폼단품', '마킹키트단품', '기타'] as const).map(cat => {
+            const count = cat === '전체' ? totalCount : (categoryCounts[cat] || 0);
+            const active = categoryFilter === cat;
+            return (
+              <button
+                key={cat}
+                onClick={() => setCategoryFilter(cat)}
+                className={`px-3 py-1 rounded-lg text-xs transition-colors ${
+                  active
+                    ? 'bg-indigo-600 text-white font-semibold'
+                    : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                }`}
+              >
+                {cat} <span className={active ? 'text-indigo-100' : 'text-gray-400'}>({count.toLocaleString()})</span>
+              </button>
+            );
+          })}
         </div>
 
         {/* 검색 + 다운로드 */}
