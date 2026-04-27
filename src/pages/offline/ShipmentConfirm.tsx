@@ -329,7 +329,9 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
           .select('finished_sku_id, component_sku_id, quantity, component:sku!bom_component_sku_id_fkey(sku_id, sku_name, barcode)')
           .in('finished_sku_id', markingSkuIds.length > 0 ? markingSkuIds : ['__none__']),
         // 수불부 누적 기반 (inventory 테이블 drift 회피)
-        getLedgerInventory(offlineWarehouseId, undefined, false),
+        offlineWarehouseId
+          ? getLedgerInventory(offlineWarehouseId, undefined, false)
+          : Promise.resolve({} as Record<string, number>),
       ]);
       if (bomResult.error) throw bomResult.error;
       if (isStale()) return;
