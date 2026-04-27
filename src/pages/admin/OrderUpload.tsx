@@ -504,6 +504,29 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
     XLSX.writeFile(wb, `BOM미등록_${new Date().toISOString().slice(0, 10)}.xlsx`);
   };
 
+  // ── 주문 현황 엑셀 다운로드 (현재 상태/검색 필터 반영) ──
+  const handleOrderListDownload = () => {
+    if (filtered.length === 0) return;
+    const data = filtered.map(o => ({
+      '주문일시': o.order_date ? o.order_date.slice(0, 16).replace('T', ' ') : '',
+      '주문번호': o.order_number || '',
+      '배송번호': o.delivery_number || '',
+      'SKU': o.sku_id || '',
+      '상품명': o.sku_name || '',
+      '옵션': o.option_text || '',
+      '수량': o.quantity || 0,
+      '마킹': o.needs_marking ? 'O' : '',
+      '상태': o.status || '',
+    }));
+    const ws = XLSX.utils.json_to_sheet(data);
+    ws['!cols'] = [{ wch: 17 }, { wch: 18 }, { wch: 18 }, { wch: 22 }, { wch: 40 }, { wch: 24 }, { wch: 6 }, { wch: 6 }, { wch: 10 }];
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, '주문현황');
+    const today = new Date().toISOString().slice(0, 10);
+    const statusTag = statusFilter !== '전체' ? `_${statusFilter}` : '';
+    XLSX.writeFile(wb, `주문현황${statusTag}_${today}.xlsx`);
+  };
+
   // ── 주문 취소 (개별 라인) ──
   const openCancelModal = (item: OnlineOrder) => {
     setCancelTarget({ item });
@@ -1424,16 +1447,27 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
           ))}
         </div>
 
-        {/* 검색 */}
-        <div className="relative mb-3">
-          <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
-          <input
-            type="text"
-            placeholder="주문번호 / 배송번호 / SKU / 상품명 / 옵션 검색"
-            value={searchText}
-            onChange={(e) => setSearchText(e.target.value)}
-            className="w-full pl-9 pr-3 py-2 border border-gray-200 rounded-xl text-sm focus:ring-2 focus:ring-indigo-500 focus:outline-none"
-          />
+        {/* 검색 + 다운로드 */}
+        <div className="flex gap-2 mb-3">
+          <div className="relative flex-1">
+            <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
+            <input
+              type="text"
+              placeholder="주문번호 / 배송번호 / SKU / 상품명 / 옵션 검색"
+              value={searchText}
+              onChange={(e) => setSearchText(e.target.value)}
+              className="w-full pl-9 pr-3 py-2 border border-gray-200 rounded-xl text-sm focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+            />
+          </div>
+          <button
+            onClick={handleOrderListDownload}
+            disabled={filtered.length === 0}
+            className="px-3 py-2 bg-emerald-600 text-white rounded-xl text-xs font-medium hover:bg-emerald-700 disabled:bg-gray-300 disabled:cursor-not-allowed flex items-center gap-1 shrink-0"
+            title={`현재 ${filtered.length.toLocaleString()}건 다운로드`}
+          >
+            <Download size={13} />
+            엑셀 다운로드 ({filtered.length.toLocaleString()})
+          </button>
         </div>
 
         {/* 주문 테이블 */}
