@@ -248,9 +248,19 @@ export function parseBomExcel(file: File, onProgress?: ProgressCallback): Promis
 }
 
 /**
- * BERRIZ SKU 업로드 양식 BOM 파싱
- * 컬럼[4]  SKU명, 컬럼[5] SKU코드(완제품), 컬럼[17] 구성유형, 컬럼[18] BOM구성("코드:수량,코드:수량")
- * BOM구성 셀 하나를 개별 (완제품→단품) 쌍으로 분해
+ * BERRIZ SKU 업로드 양식 / 재고 현황 양식 BOM 파싱 (헤더 기반 자동 매핑)
+ *
+ * 지원 양식:
+ * - sku_excel_upload_template.xlsx (SKU코드/구성유형/BOM구성)
+ * - stock_status_*.xlsx (재고 현황 — SKU코드/구성유형/BOM구성품)
+ *
+ * 헤더 행에서 다음 라벨로 컬럼을 자동 식별:
+ *   - 완제품 SKU 코드: "SKU코드"
+ *   - 완제품 SKU명: "SKU명" (옵션)
+ *   - 구성유형: "구성유형" → 'BOM' 행만 처리
+ *   - BOM 구성: "BOM구성품" 또는 "BOM구성"
+ *
+ * BOM구성 셀 형식: "코드:수량,코드:수량"
  */
 export function parseBerrizBomExcel(file: File, onProgress?: ProgressCallback): Promise<RawBomRow[]> {
   return new Promise((resolve, reject) => {
@@ -271,11 +281,38 @@ export function parseBerrizBomExcel(file: File, onProgress?: ProgressCallback): 
           return;
         }
 
+        // 헤더 자동 매핑
+        const header = (rows[0] || []).map((h: any) => String(h || '').trim());
+        const findCol = (...candidates: string[]): number => {
+          for (const c of candidates) {
+            const idx = header.indexOf(c);
+            if (idx !== -1) return idx;
+          }
+          return -1;
+        };
+
+        const skuCodeCol = findCol('SKU코드');
+        const skuNameCol = findCol('SKU명');
+        const bomTypeCol = findCol('구성유형');
+        const bomCompCol = findCol('BOM구성품', 'BOM구성');
+
+        const missing: string[] = [];
+        if (skuCodeCol === -1) missing.push('SKU코드');
+        if (bomTypeCol === -1) missing.push('구성유형');
+        if (bomCompCol === -1) missing.push('BOM구성품 또는 BOM구성');
+        if (missing.length > 0) {
+          reject(new Error(
+            `필수 컬럼을 찾을 수 없습니다: ${missing.join(', ')}. ` +
+            `BERRIZ SKU 업로드 양식 또는 재고 현황 양식인지 확인해주세요.`,
+          ));
+          return;
+        }
+
         // 단품 코드 → 이름 추론 (코드 패턴 기반)
-        // 26UN-... → 유니폼단품, 26MK-... → 마킹단품
+        // 26UN-..., 26MK-..., 26MK2-... 등
         const getComponentName = (code: string): string => {
-          if (code.includes('-MK-') || code.startsWith('26MK-')) return `마킹단품_${code}`;
-          if (code.includes('-UN-') || code.startsWith('26UN-')) return `유니폼단품_${code}`;
+          if (code.includes('-MK-') || /^26MK\d*-/.test(code)) return `마킹단품_${code}`;
+          if (code.includes('-UN-') || /^26UN\d*-/.test(code)) return `유니폼단품_${code}`;
           return code;
         };
 
@@ -284,10 +321,10 @@ export function parseBerrizBomExcel(file: File, onProgress?: ProgressCallback): 
 
         for (let i = 1; i < rows.length; i++) {
           const row = rows[i];
-          const bomType = String(row[17] || '');
-          const finishedSkuCode = String(row[5] || '').trim();
-          const finishedSkuName = String(row[4] || '').trim();
-          const bomStr = String(row[18] || '').trim();
+          const bomType = String(row[bomTypeCol] || '').trim();
+          const finishedSkuCode = String(row[skuCodeCol] || '').trim();
+          const finishedSkuName = skuNameCol !== -1 ? String(row[skuNameCol] || '').trim() : '';
+          const bomStr = String(row[bomCompCol] || '').trim();
 
           // 구성유형이 BOM이고, SKU코드와 BOM구성이 있는 행만 처리
           if (bomType !== 'BOM' || !finishedSkuCode || !bomStr) continue;
@@ -297,18 +334,19 @@ export function parseBerrizBomExcel(file: File, onProgress?: ProgressCallback): 
           for (const part of parts) {
             const [componentCode, qtyStr] = part.trim().split(':');
             if (!componentCode) continue;
+            const code = componentCode.trim();
             result.push({
               finishedSkuId: finishedSkuCode,
               finishedSkuName,
-              componentSkuId: componentCode.trim(),
-              componentSkuName: getComponentName(componentCode.trim()),
+              componentSkuId: code,
+              componentSkuName: getComponentName(code),
               quantity: Number(qtyStr) || 1,
             });
           }
         }
 
         if (result.length === 0) {
-          reject(new Error('구성유형이 BOM인 데이터를 찾을 수 없습니다. BERRIZ SKU 업로드 양식인지 확인하세요.'));
+          reject(new Error('구성유형이 BOM인 데이터를 찾을 수 없습니다. BERRIZ SKU 업로드 양식 또는 재고 현황 양식인지 확인하세요.'));
           return;
         }
 

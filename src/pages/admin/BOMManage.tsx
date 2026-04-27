@@ -223,13 +223,13 @@ export default function BOMManage() {
             }`}
           >
             <p className={`text-sm font-medium ${mode === 'berriz' ? 'text-blue-700' : 'text-gray-700'}`}>
-              BERRIZ SKU 업로드 양식
+              BERRIZ 양식 (자동 인식)
             </p>
             <p className="text-xs text-gray-500 mt-0.5">
-              sku_excel_upload_template.xlsx
+              sku_excel_upload_template.xlsx · stock_status_*.xlsx
             </p>
             <p className="text-xs text-gray-400 mt-1">
-              컬럼[5] SKU코드 · 컬럼[18] BOM구성
+              헤더 기반 자동 매핑: SKU코드 · 구성유형 · BOM구성(품)
             </p>
           </button>
           <button
@@ -251,7 +251,7 @@ export default function BOMManage() {
         </div>
         {mode === 'berriz' && (
           <p className="text-xs text-blue-600 bg-blue-50 rounded px-3 py-2">
-            BERRIZ에서 다운로드한 SKU 업로드 양식 파일을 그대로 업로드하세요. 2,000개 이상도 자동 배치 처리됩니다.
+            BERRIZ에서 다운로드한 SKU 업로드 양식 또는 재고 현황 파일을 그대로 업로드하세요. 헤더(SKU코드·구성유형·BOM구성/BOM구성품)로 컬럼을 자동 인식합니다. 수천 행도 자동 배치 처리.
           </p>
         )}
       </div>
@@ -325,7 +325,7 @@ export default function BOMManage() {
         <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-12 text-center">
           <Database size={40} className="mx-auto text-gray-300 mb-3" />
           <p className="text-gray-500">등록된 BOM이 없습니다.</p>
-          <p className="text-sm text-gray-400 mt-1">BERRIZ SKU 업로드 양식 파일을 업로드하세요.</p>
+          <p className="text-sm text-gray-400 mt-1">BERRIZ SKU 업로드 양식 또는 재고 현황 파일을 업로드하세요.</p>
         </div>
       ) : (
         <>
