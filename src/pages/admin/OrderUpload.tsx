@@ -18,6 +18,7 @@ import {
   uploadCjAvailableStock,
   getCjAvailableStock,
   toQtyMap,
+  cjAssignOrdersRpc,
   type CjStockSnapshot,
 } from '../../lib/cjAvailableStock';
 import type { OnlineOrder } from '../../types';
@@ -97,6 +98,9 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
     uploading: boolean;
   } | null>(null);
   const cjFileInputRef = useRef<HTMLInputElement>(null);
+  // 이중 제출 방지 가드 (React 18 fast-double-click race 회피)
+  const creatingWoRef = useRef(false);
+  const cjUploadingRef = useRef(false);
 
   // 마킹 가능 주문 분석
   const [markingAnalysis, setMarkingAnalysis] = useState<{
@@ -697,6 +701,8 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
 
   const handleCjUploadConfirm = async () => {
     if (!cjUploadModal?.parsed) return;
+    if (cjUploadingRef.current) return;
+    cjUploadingRef.current = true;
     setCjUploadModal({ ...cjUploadModal, uploading: true });
     try {
       const r = await uploadCjAvailableStock(cjUploadModal.parsed);
@@ -706,6 +712,8 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
       setMessage({ type: 'success', text: `CJ 가용재고 ${r.inserted}종 갱신 완료${r.skuRegistered > 0 ? ` (SKU 자동 등록 ${r.skuRegistered})` : ''}` });
     } catch (err: any) {
       setCjUploadModal({ ...cjUploadModal, error: err.message, uploading: false });
+    } finally {
+      cjUploadingRef.current = false;
     }
   };
 
@@ -713,12 +721,14 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
   // CJ 가용재고 우선: FIFO(주문일시 빠른 순) 차감, 매칭되면 status='CJ대기' 처리
   // 못 맞춘 주문만 매장 재고 평가 후 이관 WO 생성
   const handleCreateWorkOrder = async () => {
+    if (creatingWoRef.current) return;
     const allEligible = orders.filter(o => (o.status === '신규' || o.status === '재고부족') && !o.work_order_id);
     if (allEligible.length === 0) {
       setMessage({ type: 'error', text: '작업지시서를 생성할 주문이 없습니다. (신규/재고부족)' });
       return;
     }
 
+    creatingWoRef.current = true;
     setCreatingWo(true);
     setWoResult(null);
     try {
@@ -739,38 +749,24 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
         }
       }
 
-      // CJ대기 상태로 일괄 update (해당 주문은 작업지시서 미포함)
+      // 한 트랜잭션 RPC 로 (a) 가용재고 차감, (b) status='CJ대기', (c) activity_log 처리
+      // CHECK(quantity>=0) 위반 또는 매칭 불일치 시 자동 rollback → double-counting 방지
       if (cjAssigned.length > 0) {
-        const ids = cjAssigned.map(o => o.id);
-        for (let i = 0; i < ids.length; i += 100) {
-          await supabaseAdmin.from('online_order').update({ status: 'CJ대기' }).in('id', ids.slice(i, i + 100));
+        // SKU별 차감량 산출 (양수만)
+        const skuDeltas: Record<string, number> = {};
+        for (const o of cjAssigned) {
+          skuDeltas[o.sku_id] = (skuDeltas[o.sku_id] || 0) + (o.quantity || 0);
         }
-        // CJ 가용재고 스냅샷도 차감 후 DB 갱신
-        const consumed: { sku_id: string; quantity: number }[] = [];
-        for (const r of cjSnapshot.rows) {
-          const newQty = cjPool[r.sku_id] ?? r.quantity;
-          if (newQty !== r.quantity) consumed.push({ sku_id: r.sku_id, quantity: newQty });
-        }
-        for (let i = 0; i < consumed.length; i += 100) {
-          const batch = consumed.slice(i, i + 100);
-          await Promise.all(batch.map(c =>
-            supabaseAdmin.from('cj_available_stock').update({ quantity: c.quantity }).eq('sku_id', c.sku_id)
-          ));
-        }
-        // activity_log
-        await supabase.from('activity_log').insert({
-          user_id: currentUserId,
-          action_type: 'order_reclassify',
-          action_date: new Date().toISOString().slice(0, 10),
-          summary: {
-            reason: 'CJ 가용재고 충당 → CJ대기',
-            count: cjAssigned.length,
-            totalQty: cjAssigned.reduce((s, o) => s + (o.quantity || 0), 0),
-          },
+        await cjAssignOrdersRpc({
+          orderIds: cjAssigned.map(o => o.id),
+          skuDeltas,
+          userId: currentUserId,
         });
-        // 메모리 스냅샷도 갱신
-        const fresh = await getCjAvailableStock();
-        setCjSnapshot(fresh);
+        // 메모리 스냅샷 동기화 (DB는 RPC 내에서 이미 차감됨 — 추가 라운드트립 없이 메모리만 갱신)
+        setCjSnapshot((prev) => ({
+          rows: prev.rows.map((r) => ({ ...r, quantity: cjPool[r.sku_id] ?? r.quantity })),
+          uploadedAt: prev.uploadedAt,
+        }));
       }
 
       // CJ 충당 후 남은 주문이 없으면 종료
@@ -1045,6 +1041,7 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
       setMessage({ type: 'error', text: `작업지시서 생성 실패: ${err.message}` });
     } finally {
       setCreatingWo(false);
+      creatingWoRef.current = false;
     }
   };
 

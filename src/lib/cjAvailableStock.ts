@@ -111,9 +111,12 @@ export function parseCjStockExcel(file: File): Promise<{ rows: CjStockRow[]; sta
   });
 }
 
-/** 스냅샷 전체 갱신 (truncate + bulk insert). 미존재 SKU는 sku 테이블에 자동 등록. */
+/**
+ * 스냅샷 전체 갱신 — Postgres RPC `replace_cj_stock_snapshot` 한 트랜잭션 처리.
+ * 미존재 SKU는 사전에 sku 테이블에 자동 등록 (FK 보호).
+ */
 export async function uploadCjAvailableStock(rows: CjStockRow[]): Promise<{ inserted: number; skuRegistered: number }> {
-  // 1) 누락 SKU 자동 등록 (FK 보호)
+  // 1) 누락 SKU 자동 등록 (FK 보호) — RPC 진입 전에 처리
   const skuIds = [...new Set(rows.map((r) => r.skuId))];
   let skuRegistered = 0;
   if (skuIds.length > 0) {
@@ -134,24 +137,49 @@ export async function uploadCjAvailableStock(rows: CjStockRow[]): Promise<{ inse
     }
   }
 
-  // 2) 기존 스냅샷 전체 삭제
-  await supabaseAdmin.from('cj_available_stock').delete().neq('sku_id', '__never__');
-
-  // 3) 새 스냅샷 insert (500개씩 배치)
-  const now = new Date().toISOString();
-  const insertRows = rows.map((r) => ({
-    sku_id: r.skuId,
-    quantity: r.quantity,
-    uploaded_at: now,
-  }));
-  let inserted = 0;
-  for (let i = 0; i < insertRows.length; i += 500) {
-    const batch = insertRows.slice(i, i + 500);
-    const { error } = await supabaseAdmin.from('cj_available_stock').insert(batch);
-    if (error) throw new Error(`CJ 가용재고 저장 실패: ${error.message}`);
-    inserted += batch.length;
+  // 2) RPC 한 트랜잭션 내 truncate + insert (insert 실패 시 자동 rollback)
+  const payload = rows.map((r) => ({ sku_id: r.skuId, quantity: r.quantity }));
+  const { data, error } = await supabaseAdmin.rpc('replace_cj_stock_snapshot', { p_rows: payload });
+  if (error) {
+    if (error.message?.includes('does not exist') || error.code === '42883') {
+      throw new Error('DB 마이그레이션이 필요합니다. migration_cj_p0_rpc.sql 적용 후 재시도하세요.');
+    }
+    throw new Error(`CJ 가용재고 저장 실패: ${error.message}`);
   }
+  const inserted = (data as { inserted?: number } | null)?.inserted ?? 0;
   return { inserted, skuRegistered };
+}
+
+/**
+ * CJ 가용재고로 충당 가능한 주문에 대해 한 트랜잭션으로:
+ *   (a) 가용재고 차감, (b) online_order.status='CJ대기', (c) activity_log
+ * sku_deltas: { sku_id: qty } 양수만.
+ */
+export async function cjAssignOrdersRpc(args: {
+  orderIds: string[];
+  skuDeltas: Record<string, number>;
+  userId: string;
+}): Promise<{ cjAssignedCount: number; skuCount: number; totalQty: number }> {
+  const { data, error } = await supabaseAdmin.rpc('cj_assign_orders', {
+    p_order_ids: args.orderIds,
+    p_sku_deltas: args.skuDeltas,
+    p_user_id: args.userId,
+  });
+  if (error) {
+    if (error.message?.includes('does not exist') || error.code === '42883') {
+      throw new Error('DB 마이그레이션이 필요합니다. migration_cj_p0_rpc.sql 적용 후 재시도하세요.');
+    }
+    if (error.code === '23514') {
+      throw new Error('CJ 가용재고가 부족해 차감 불가 (CHECK 제약 위반). 스냅샷을 최신화하고 재시도하세요.');
+    }
+    throw new Error(`CJ 분류 처리 실패: ${error.message}`);
+  }
+  const r = (data as any) || {};
+  return {
+    cjAssignedCount: r.cj_assigned_count ?? 0,
+    skuCount: r.sku_count ?? 0,
+    totalQty: r.total_qty ?? 0,
+  };
 }
 
 /** 현 스냅샷 전체 조회 (작업지시서 생성 시 사용). */
