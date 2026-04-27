@@ -13,6 +13,13 @@ import {
   createPlaysWorkOrder,
   type PlaysAnalysisResult,
 } from '../../lib/createPlaysWorkOrder';
+import {
+  parseCjStockExcel,
+  uploadCjAvailableStock,
+  getCjAvailableStock,
+  toQtyMap,
+  type CjStockSnapshot,
+} from '../../lib/cjAvailableStock';
 import type { OnlineOrder } from '../../types';
 import * as XLSX from 'xlsx';
 import {
@@ -81,6 +88,15 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
   const [playsCreating, setPlaysCreating] = useState(false);
   const [playsModal, setPlaysModal] = useState<PlaysAnalysisResult | null>(null);
 
+  // CJ 가용재고
+  const [cjSnapshot, setCjSnapshot] = useState<CjStockSnapshot>({ rows: [], uploadedAt: null });
+  const [cjUploadModal, setCjUploadModal] = useState<{
+    parsed: { skuId: string; skuName?: string; quantity: number }[] | null;
+    error: string | null;
+    uploading: boolean;
+  } | null>(null);
+  const cjFileInputRef = useRef<HTMLInputElement>(null);
+
   // 마킹 가능 주문 분석
   const [markingAnalysis, setMarkingAnalysis] = useState<{
     loading: boolean;
@@ -116,6 +132,13 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
   }, [isStale]);
 
   useEffect(() => { loadDashboard(); }, [loadDashboard]);
+
+  // CJ 가용재고 스냅샷 초기 로드
+  useEffect(() => {
+    getCjAvailableStock()
+      .then((s) => setCjSnapshot(s))
+      .catch((e) => console.error('[CJ stock load]', e));
+  }, []);
 
   // ── 상태별 통계 ──
   const statusCounts = orders.reduce((acc, o) => {
@@ -629,7 +652,45 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
     }
   };
 
+  // ── CJ 가용재고 엑셀 선택 (파싱만, 저장 전 미리보기) ──
+  const handleCjFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    e.target.value = '';
+    setCjUploadModal({ parsed: null, error: null, uploading: false });
+    try {
+      const { rows, stats } = await parseCjStockExcel(file);
+      if (rows.length === 0) {
+        setCjUploadModal({
+          parsed: null,
+          error: `매칭 행 0건. (행 ${stats.totalRows} / 창고 제외 ${stats.warehouseSkipped} / 제조사 제외 ${stats.partnerSkipped} / 가용 0 ${stats.zeroSkipped})`,
+          uploading: false,
+        });
+        return;
+      }
+      setCjUploadModal({ parsed: rows, error: null, uploading: false });
+    } catch (err: any) {
+      setCjUploadModal({ parsed: null, error: err.message || '파싱 실패', uploading: false });
+    }
+  };
+
+  const handleCjUploadConfirm = async () => {
+    if (!cjUploadModal?.parsed) return;
+    setCjUploadModal({ ...cjUploadModal, uploading: true });
+    try {
+      const r = await uploadCjAvailableStock(cjUploadModal.parsed);
+      const fresh = await getCjAvailableStock();
+      setCjSnapshot(fresh);
+      setCjUploadModal(null);
+      setMessage({ type: 'success', text: `CJ 가용재고 ${r.inserted}종 갱신 완료${r.skuRegistered > 0 ? ` (SKU 자동 등록 ${r.skuRegistered})` : ''}` });
+    } catch (err: any) {
+      setCjUploadModal({ ...cjUploadModal, error: err.message, uploading: false });
+    }
+  };
+
   // ── 작업지시서 생성 (신규 주문 → work_order, 재고 체크 포함) ──
+  // CJ 가용재고 우선: FIFO(주문일시 빠른 순) 차감, 매칭되면 status='CJ대기' 처리
+  // 못 맞춘 주문만 매장 재고 평가 후 이관 WO 생성
   const handleCreateWorkOrder = async () => {
     const allEligible = orders.filter(o => (o.status === '신규' || o.status === '재고부족') && !o.work_order_id);
     if (allEligible.length === 0) {
@@ -640,6 +701,66 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
     setCreatingWo(true);
     setWoResult(null);
     try {
+      // ── 0단계: CJ 가용재고 우선 매칭 ──
+      // 주문일시 오름차순 FIFO. finished_sku 자체로 매칭 (BOM 분해 없음)
+      const cjPool: Record<string, number> = { ...toQtyMap(cjSnapshot) };
+      const sortedByDate = [...allEligible].sort((a, b) => (a.order_date || '').localeCompare(b.order_date || ''));
+      const cjAssigned: typeof allEligible = [];
+      const remaining: typeof allEligible = [];
+      for (const o of sortedByDate) {
+        const need = o.quantity || 0;
+        const have = cjPool[o.sku_id] || 0;
+        if (need > 0 && have >= need) {
+          cjPool[o.sku_id] = have - need;
+          cjAssigned.push(o);
+        } else {
+          remaining.push(o);
+        }
+      }
+
+      // CJ대기 상태로 일괄 update (해당 주문은 작업지시서 미포함)
+      if (cjAssigned.length > 0) {
+        const ids = cjAssigned.map(o => o.id);
+        for (let i = 0; i < ids.length; i += 100) {
+          await supabaseAdmin.from('online_order').update({ status: 'CJ대기' }).in('id', ids.slice(i, i + 100));
+        }
+        // CJ 가용재고 스냅샷도 차감 후 DB 갱신
+        const consumed: { sku_id: string; quantity: number }[] = [];
+        for (const r of cjSnapshot.rows) {
+          const newQty = cjPool[r.sku_id] ?? r.quantity;
+          if (newQty !== r.quantity) consumed.push({ sku_id: r.sku_id, quantity: newQty });
+        }
+        for (let i = 0; i < consumed.length; i += 100) {
+          const batch = consumed.slice(i, i + 100);
+          await Promise.all(batch.map(c =>
+            supabaseAdmin.from('cj_available_stock').update({ quantity: c.quantity }).eq('sku_id', c.sku_id)
+          ));
+        }
+        // activity_log
+        await supabase.from('activity_log').insert({
+          user_id: currentUserId,
+          action_type: 'order_reclassify',
+          action_date: new Date().toISOString().slice(0, 10),
+          summary: {
+            reason: 'CJ 가용재고 충당 → CJ대기',
+            count: cjAssigned.length,
+            totalQty: cjAssigned.reduce((s, o) => s + (o.quantity || 0), 0),
+          },
+        });
+        // 메모리 스냅샷도 갱신
+        const fresh = await getCjAvailableStock();
+        setCjSnapshot(fresh);
+      }
+
+      // CJ 충당 후 남은 주문이 없으면 종료
+      if (remaining.length === 0) {
+        setWoResult(`CJ 가용재고로 ${cjAssigned.length}건 / ${cjAssigned.reduce((s, o) => s + (o.quantity || 0), 0)}개 모두 충당. 작업지시서 생성 안 됨.`);
+        setMessage({ type: 'success', text: 'CJ 가용재고로 전량 충당되어 작업지시서가 필요 없습니다.' });
+        loadDashboard();
+        setCreatingWo(false);
+        return;
+      }
+
       // ── 1단계: 오프라인 매장 재고 조회 (수불부 공식 기반) ──
       // inventory 테이블의 Math.max 클램핑·비원자 upsert drift를 회피하기 위해
       // inventory_transaction 누적으로 현재 잔량을 계산.
@@ -648,9 +769,9 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
       const invMap: Record<string, number> = whId ? await getLedgerInventory(whId, undefined, false) : {};
 
       // ── 1.5단계: BOM 조회 (마킹 완제품 → 구성품, 이후 차감에 사용) ──
-      // 신규 주문 + 기존 작업지시서 라인 모두에서 마킹 완제품 SKU 수집
+      // CJ 충당 후 남은 주문 + 기존 작업지시서 라인 모두에서 마킹 완제품 SKU 수집
       const allMarkingCandidates = new Set(
-        allEligible.filter(o => o.sku_id.startsWith('26UN-') && o.sku_id.includes('_')).map(o => o.sku_id)
+        remaining.filter(o => o.sku_id.startsWith('26UN-') && o.sku_id.includes('_')).map(o => o.sku_id)
       );
 
       const activeStatuses = ['이관준비', '이관중', '입고확인완료', '마킹중', '마킹완료'];
@@ -720,17 +841,17 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
       }
 
       // ── 3단계: 선착순 배분 (오래된 주문부터 재고 차감) ──
-      // 주문일시 빠른 순 정렬
-      allEligible.sort((a, b) => (a.order_date || '').localeCompare(b.order_date || ''));
+      // CJ 충당 후 남은 주문을 주문일시 빠른 순 정렬
+      remaining.sort((a, b) => (a.order_date || '').localeCompare(b.order_date || ''));
 
       // 가용 재고 복사본 (차감용)
       const availableStock: Record<string, number> = { ...invMap };
 
-      const canShip: typeof allEligible = [];
-      const cannotShip: typeof allEligible = [];
+      const canShip: typeof remaining = [];
+      const cannotShip: typeof remaining = [];
 
       // 주문별로 구성품 확인 → 재고 있으면 차감 후 발송가능, 없으면 재고부족
-      for (const o of allEligible) {
+      for (const o of remaining) {
         const skuId = o.sku_id;
         const qty = o.quantity;
 
@@ -796,8 +917,10 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
       const fromNew = canShip.filter(o => o.status === '신규').length;
       const fromShortage = canShip.filter(o => o.status === '재고부족').length;
 
+      const cjLine = cjAssigned.length > 0 ? `CJ 가용재고로 ${cjAssigned.length}건 → CJ대기 처리\n` : '';
       const confirmMsg = canShip.length > 0
-        ? `발송 가능 ${canShip.length}건 → 작업지시서 생성\n` +
+        ? cjLine +
+          `발송 가능 ${canShip.length}건 → 작업지시서 생성\n` +
           (fromNew > 0 ? `  - 신규: ${fromNew}건\n` : '') +
           (fromShortage > 0 ? `  - 재고부족→해소: ${fromShortage}건\n` : '') +
           (cannotShip.length > 0 ? `재고 부족 유지 ${cannotShip.length}건 → 제외\n\n` : '\n') +
@@ -805,7 +928,7 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
           Object.entries(shortageSkus).slice(0, 5).map(([s, v]) => `  ${s}: 필요${v.demand} / 재고${v.stock}`).join('\n') +
           (Object.keys(shortageSkus).length > 5 ? `\n  ... 외 ${Object.keys(shortageSkus).length - 5}종` : '') +
           '\n\n진행하시겠습니까?'
-        : `전체 ${allEligible.length}건 모두 재고 부족입니다. 작업지시서를 생성할 수 없습니다.`;
+        : cjLine + `매장 발송 대상 ${remaining.length}건 모두 재고 부족입니다. 작업지시서를 생성할 수 없습니다.`;
 
       if (canShip.length === 0) {
         // 재고 부족 상태로 변경만
@@ -883,11 +1006,18 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
         action_type: 'work_order_create',
         work_order_id: woId,
         action_date: today,
-        summary: { lines: lines.length, orders: canShip.length, shortage: cannotShip.length, totalQty: canShip.reduce((s, o) => s + o.quantity, 0) },
+        summary: {
+          lines: lines.length,
+          orders: canShip.length,
+          shortage: cannotShip.length,
+          cjAssigned: cjAssigned.length,
+          totalQty: canShip.reduce((s, o) => s + o.quantity, 0),
+        },
       }).then(() => {});
 
+      const cjMsg = cjAssigned.length > 0 ? `CJ대기 ${cjAssigned.length}건 / ` : '';
       const shortageMsg = cannotShip.length > 0 ? ` / 재고부족 ${cannotShip.length}건 제외` : '';
-      setWoResult(`작업지시서 생성 완료! ${lines.length}종 ${canShip.reduce((s, o) => s + o.quantity, 0)}개 (주문 ${canShip.length}건 연결${shortageMsg})`);
+      setWoResult(`${cjMsg}작업지시서 생성 완료! ${lines.length}종 ${canShip.reduce((s, o) => s + o.quantity, 0)}개 (주문 ${canShip.length}건 연결${shortageMsg})`);
       setMessage({ type: 'success', text: `작업지시서 생성 완료 — 오프라인 매장 발송 화면에서 확인하세요` });
       loadDashboard();
     } catch (err: any) {
@@ -1071,6 +1201,7 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
     '재고부족': 'bg-red-50 text-red-700',
     '하자재발송': 'bg-orange-50 text-orange-700',
     '취소': 'bg-gray-100 text-gray-500 line-through',
+    'CJ대기': 'bg-emerald-50 text-emerald-700',
   };
 
   return (
@@ -1270,6 +1401,16 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
               {markingAnalysis.loading ? '분석 중...' : '마킹 가능 분석'}
             </button>
             <button
+              onClick={() => cjFileInputRef.current?.click()}
+              disabled={readOnly}
+              className="px-3 py-1.5 bg-emerald-600 text-white rounded-lg text-xs font-semibold hover:bg-emerald-700 disabled:bg-gray-300 flex items-center gap-1"
+              title={cjSnapshot.uploadedAt ? `최근 업로드: ${new Date(cjSnapshot.uploadedAt).toLocaleString('ko-KR')}` : 'CJ 가용재고 미업로드'}
+            >
+              <Upload size={13} />
+              CJ 가용재고 업로드 {cjSnapshot.rows.length > 0 && `(${cjSnapshot.rows.length}종)`}
+            </button>
+            <input ref={cjFileInputRef} type="file" accept=".xlsx,.xls" onChange={handleCjFileSelect} className="hidden" />
+            <button
               onClick={handleCreateWorkOrder}
               disabled={readOnly || creatingWo || orders.filter(o => (o.status === '신규' || o.status === '재고부족') && !o.work_order_id).length === 0}
               className="px-4 py-1.5 bg-indigo-600 text-white rounded-lg text-xs font-semibold hover:bg-indigo-700 disabled:bg-gray-300"
@@ -1433,7 +1574,7 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
 
         {/* 상태별 카드 */}
         <div className="grid grid-cols-3 sm:grid-cols-7 gap-2 mb-4">
-          {['신규', '발송대기', '이관중', '마킹중', '출고완료', '재고부족', '취소'].map(status => (
+          {['신규', '발송대기', 'CJ대기', '이관중', '마킹중', '출고완료', '재고부족', '취소'].map(status => (
             <button
               key={status}
               onClick={() => setStatusFilter(statusFilter === status ? '전체' : status)}
@@ -1563,6 +1704,92 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
               >
                 닫기
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* CJ 가용재고 업로드 미리보기 모달 */}
+      {cjUploadModal && (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-xl shadow-xl max-w-xl w-full max-h-[80vh] overflow-hidden flex flex-col">
+            <div className="px-5 py-3 border-b border-gray-100 flex items-center justify-between">
+              <div>
+                <h3 className="text-lg font-bold text-gray-900">CJ 가용재고 업로드</h3>
+                <p className="text-xs text-gray-500 mt-0.5">
+                  BERRIZ 재고 현황 양식에서 SKU코드·가용재고 컬럼을 자동 인식. 저장 시 기존 스냅샷 전체 갱신.
+                </p>
+              </div>
+              <button onClick={() => setCjUploadModal(null)} className="text-gray-400 hover:text-gray-600">
+                <X size={18} />
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto px-5 py-3 text-xs">
+              {cjUploadModal.error && (
+                <div className="bg-red-50 border border-red-200 rounded-lg p-3 mb-3 text-red-800">
+                  {cjUploadModal.error}
+                </div>
+              )}
+              {cjUploadModal.parsed && (
+                <>
+                  <div className="grid grid-cols-3 gap-3 mb-3">
+                    <div className="bg-emerald-50 border border-emerald-100 rounded-lg p-2.5">
+                      <div className="text-xs text-emerald-700">SKU 종</div>
+                      <div className="font-bold text-emerald-900">{cjUploadModal.parsed.length.toLocaleString()}</div>
+                    </div>
+                    <div className="bg-emerald-50 border border-emerald-100 rounded-lg p-2.5">
+                      <div className="text-xs text-emerald-700">합계 수량</div>
+                      <div className="font-bold text-emerald-900">{cjUploadModal.parsed.reduce((s, r) => s + r.quantity, 0).toLocaleString()}</div>
+                    </div>
+                    <div className="bg-blue-50 border border-blue-100 rounded-lg p-2.5">
+                      <div className="text-xs text-blue-700">현 스냅샷</div>
+                      <div className="font-bold text-blue-900">{cjSnapshot.rows.length.toLocaleString()} 종</div>
+                    </div>
+                  </div>
+                  <div className="text-xs font-semibold text-gray-600 mb-1.5">상위 30건 미리보기</div>
+                  <div className="border border-gray-200 rounded-lg overflow-hidden">
+                    <table className="w-full">
+                      <thead className="bg-gray-50">
+                        <tr>
+                          <th className="text-left px-2 py-1.5 font-medium">SKU</th>
+                          <th className="text-left px-2 py-1.5 font-medium">상품명</th>
+                          <th className="text-right px-2 py-1.5 font-medium">가용재고</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-100">
+                        {cjUploadModal.parsed.slice(0, 30).map((r) => (
+                          <tr key={r.skuId}>
+                            <td className="px-2 py-1 font-mono">{r.skuId}</td>
+                            <td className="px-2 py-1 truncate max-w-[280px]">{r.skuName || '-'}</td>
+                            <td className="px-2 py-1 text-right">{r.quantity.toLocaleString()}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </>
+              )}
+            </div>
+            <div className="px-5 py-3 border-t border-gray-100 flex items-center justify-between bg-gray-50">
+              <p className="text-xs text-gray-500">
+                저장하면 기존 CJ 가용재고 스냅샷이 <strong>전체 덮어쓰기</strong> 됩니다.
+              </p>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => setCjUploadModal(null)}
+                  disabled={cjUploadModal.uploading}
+                  className="px-3 py-1.5 bg-gray-100 text-gray-600 rounded-lg text-xs hover:bg-gray-200"
+                >
+                  취소
+                </button>
+                <button
+                  onClick={handleCjUploadConfirm}
+                  disabled={!cjUploadModal.parsed || cjUploadModal.uploading || readOnly}
+                  className="px-3 py-1.5 bg-emerald-600 text-white rounded-lg text-xs font-semibold hover:bg-emerald-700 disabled:bg-gray-300"
+                >
+                  {cjUploadModal.uploading ? '저장 중...' : `저장 (${cjUploadModal.parsed?.length || 0}종)`}
+                </button>
+              </div>
             </div>
           </div>
         </div>
