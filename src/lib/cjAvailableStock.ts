@@ -41,11 +41,14 @@ export function parseCjStockExcel(file: File): Promise<{ rows: CjStockRow[]; sta
         const rows: any[][] = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' });
         if (rows.length < 2) { reject(new Error('데이터가 없습니다.')); return; }
 
+        // 헤더 자동 매핑 — 공백 제거 후 부분 일치 (예: "SKU 코드", "가용재고(개)")
+        const normalize = (s: string) => s.replace(/\s+/g, '').toLowerCase();
         const header = (rows[0] || []).map((h: any) => String(h || '').trim());
+        const headerNorm = header.map(normalize);
         const findCol = (...candidates: string[]): number => {
-          for (const c of candidates) {
-            const idx = header.indexOf(c);
-            if (idx !== -1) return idx;
+          const cands = candidates.map(normalize);
+          for (let i = 0; i < headerNorm.length; i++) {
+            if (cands.some((c) => headerNorm[i] === c || headerNorm[i].includes(c))) return i;
           }
           return -1;
         };
@@ -171,6 +174,17 @@ export async function cjAssignOrdersRpc(args: {
     }
     if (error.code === '23514') {
       throw new Error('CJ 가용재고가 부족해 차감 불가 (CHECK 제약 위반). 스냅샷을 최신화하고 재시도하세요.');
+    }
+    if (error.code === 'P0001') {
+      // RPC 내 raise exception — 메시지 패턴별로 친화화
+      const msg = error.message || '';
+      if (msg.includes('cj_available_stock 에 sku_id=')) {
+        throw new Error('CJ 가용재고 스냅샷에 없는 SKU 가 포함되었습니다. 페이지를 새로고침해서 최신 스냅샷을 다시 받은 뒤 재시도하세요.');
+      }
+      if (msg.includes('online_order 업데이트 매칭 불일치')) {
+        throw new Error('주문 데이터가 변경되어 일부 주문을 찾을 수 없습니다. 페이지를 새로고침하고 재시도하세요.');
+      }
+      throw new Error(`CJ 분류 처리 실패: ${msg}`);
     }
     throw new Error(`CJ 분류 처리 실패: ${error.message}`);
   }

@@ -2,6 +2,7 @@ import { supabaseAdmin } from './supabaseAdmin';
 import { supabase } from './supabase';
 import { getWarehouseId } from './warehouseStore';
 import { getLedgerInventory } from './ledgerInventory';
+import { toMarkingSku } from './skuPrefix';
 
 export interface PossibleOrder {
   orderId: string;
@@ -173,7 +174,7 @@ export async function analyzePlaysBasedOrders(): Promise<PlaysAnalysisResult> {
       if (!components || components.length === 0) {
         // BOM 미등록 → 패턴 추정 (OrderUpload 기존 로직과 동일)
         const base = o.sku_id.split('_')[0];
-        const mkSku = base.replace('26UN-', '26MK-');
+        const mkSku = toMarkingSku(base);
         components = [
           { skuId: base, skuName: base, qty: 1 },
           { skuId: mkSku, skuName: mkSku, qty: 1 },

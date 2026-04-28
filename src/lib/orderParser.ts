@@ -1,4 +1,5 @@
 import * as XLSX from 'xlsx';
+import { PREFIX, isUniform, isFinishedMarked } from './skuPrefix';
 
 export interface ParsedOrder {
   orderNumber: string;
@@ -34,11 +35,11 @@ export interface OrderParseResult {
  */
 function classifyMarking(skuId: string, _option: string): { needsMarking: boolean; markingType: 'completed' | 'kit' | 'none' } {
   // 마킹 완제품: 26UN- 접두사 + _선수이니셜 접미사
-  if (skuId.startsWith('26UN-') && skuId.includes('_')) {
+  if (isFinishedMarked(skuId)) {
     return { needsMarking: true, markingType: 'completed' };
   }
-  // 마킹키트 단품
-  if (skuId.startsWith('26MK-')) {
+  // 마킹키트 단품 — 현재 26MK- 만 (26MK2- 정책 결정 후 isMarkingKit 로 확장 가능)
+  if (skuId.startsWith(PREFIX.marking)) {
     return { needsMarking: true, markingType: 'kit' };
   }
   // 마킹없음
@@ -93,7 +94,7 @@ export function parseOrderExcel(wb: XLSX.WorkBook): OrderParseResult {
     const option = String(row[colIdx.option] || '').trim();
     const { needsMarking, markingType } = classifyMarking(skuId, option);
     // 오프라인 출고 대상: 유니폼(26UN-*) 또는 마킹키트(26MK-*)만
-    const needsOfflineShipment = skuId.startsWith('26UN-') || skuId.startsWith('26MK-');
+    const needsOfflineShipment = isUniform(skuId) || skuId.startsWith(PREFIX.marking);
 
     // 배송상태 정규화: 앞뒤 공백 + 모든 내부 공백/NBSP/특수문자 제거
     // (베리즈 엑셀에 "배송완료 " 뒤 공백, NBSP, zero-width space 등이 섞이는 경우 방어)

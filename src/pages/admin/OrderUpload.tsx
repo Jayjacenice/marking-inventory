@@ -22,6 +22,7 @@ import {
   type CjStockSnapshot,
 } from '../../lib/cjAvailableStock';
 import type { OnlineOrder } from '../../types';
+import { isUniform, isFinishedMarked, toMarkingSku } from '../../lib/skuPrefix';
 import * as XLSX from 'xlsx';
 import {
   ShoppingCart, Upload, Download, Search, AlertTriangle, CheckCircle,
@@ -160,8 +161,8 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
   // 기타: 그 외 (26AC, 26AP, 26CL 등)
   const getOrderCategory = (skuId: string): '완제품' | '유니폼단품' | '마킹키트단품' | '기타' => {
     if (!skuId) return '기타';
-    if (skuId.startsWith('26UN-') && skuId.includes('_')) return '완제품';
-    if (skuId.startsWith('26UN-')) return '유니폼단품';
+    if (isFinishedMarked(skuId)) return '완제품';
+    if (isUniform(skuId)) return '유니폼단품';
     if (/^26MK\d*-/.test(skuId)) return '마킹키트단품';
     return '기타';
   };
@@ -322,7 +323,7 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
     const wh = { id: offId };
 
     // BOM 조회: 마킹 완제품(26UN-xxx_YYY) → 구성품 전개
-    const markingSkuIds = Object.keys(orderDemand).filter(s => s.startsWith('26UN-') && s.includes('_'));
+    const markingSkuIds = Object.keys(orderDemand).filter(isFinishedMarked);
     const bomMap: Record<string, { components: { skuId: string; qty: number }[] }> = {};
     if (markingSkuIds.length > 0) {
       for (let i = 0; i < markingSkuIds.length; i += 500) {
@@ -341,7 +342,7 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
     const componentDemand: Record<string, number> = {};
     const skuToComponents: Record<string, string[]> = {}; // 원본SKU → 체크할 구성품 목록
     for (const [skuId, demand] of Object.entries(orderDemand)) {
-      if (skuId.startsWith('26UN-') && skuId.includes('_')) {
+      if (isFinishedMarked(skuId)) {
         // 마킹 완제품 → BOM 전개
         const bom = bomMap[skuId];
         if (bom) {
@@ -352,7 +353,7 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
         } else {
           // BOM 미등록 → SKU 패턴으로 추정 (유니폼 + 마킹)
           const baseSku = skuId.split('_')[0];
-          const mkSku = baseSku.replace('26UN-', '26MK-');
+          const mkSku = toMarkingSku(baseSku);
           skuToComponents[skuId] = [baseSku, mkSku];
           componentDemand[baseSku] = (componentDemand[baseSku] || 0) + demand.qty;
           componentDemand[mkSku] = (componentDemand[mkSku] || 0) + demand.qty;
@@ -721,19 +722,20 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
   // CJ 가용재고 우선: FIFO(주문일시 빠른 순) 차감, 매칭되면 status='CJ대기' 처리
   // 못 맞춘 주문만 매장 재고 평가 후 이관 WO 생성
   const handleCreateWorkOrder = async () => {
+    // 가드: ref 를 가장 먼저 점유해 동시 클릭 차단. 이후 모든 early return 은 finally 에서 reset.
     if (creatingWoRef.current) return;
-    const allEligible = orders.filter(o => (o.status === '신규' || o.status === '재고부족') && !o.work_order_id);
-    if (allEligible.length === 0) {
-      setMessage({ type: 'error', text: '작업지시서를 생성할 주문이 없습니다. (신규/재고부족)' });
-      return;
-    }
-
     creatingWoRef.current = true;
-    setCreatingWo(true);
-    setWoResult(null);
     try {
+      const allEligible = orders.filter(o => (o.status === '신규' || o.status === '재고부족') && !o.work_order_id);
+      if (allEligible.length === 0) {
+        setMessage({ type: 'error', text: '작업지시서를 생성할 주문이 없습니다. (신규/재고부족)' });
+        return;
+      }
+      setCreatingWo(true);
+      setWoResult(null);
       // ── 0단계: CJ 가용재고 우선 매칭 ──
-      // 주문일시 오름차순 FIFO. finished_sku 자체로 매칭 (BOM 분해 없음)
+      // 정책: BOM 미분해, 전량 충당만 허용, FIFO(주문일시 오름차순)
+      // 변경 시 README.md "재고 매칭 정책" 섹션 함께 갱신할 것
       const cjPool: Record<string, number> = { ...toQtyMap(cjSnapshot) };
       const sortedByDate = [...allEligible].sort((a, b) => (a.order_date || '').localeCompare(b.order_date || ''));
       const cjAssigned: typeof allEligible = [];
@@ -769,12 +771,11 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
         }));
       }
 
-      // CJ 충당 후 남은 주문이 없으면 종료
+      // CJ 충당 후 남은 주문이 없으면 종료 (finally 가 ref/state 모두 reset)
       if (remaining.length === 0) {
         setWoResult(`CJ 가용재고로 ${cjAssigned.length}건 / ${cjAssigned.reduce((s, o) => s + (o.quantity || 0), 0)}개 모두 충당. 작업지시서 생성 안 됨.`);
         setMessage({ type: 'success', text: 'CJ 가용재고로 전량 충당되어 작업지시서가 필요 없습니다.' });
         loadDashboard();
-        setCreatingWo(false);
         return;
       }
 
@@ -788,7 +789,7 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
       // ── 1.5단계: BOM 조회 (마킹 완제품 → 구성품, 이후 차감에 사용) ──
       // CJ 충당 후 남은 주문 + 기존 작업지시서 라인 모두에서 마킹 완제품 SKU 수집
       const allMarkingCandidates = new Set(
-        remaining.filter(o => o.sku_id.startsWith('26UN-') && o.sku_id.includes('_')).map(o => o.sku_id)
+        remaining.filter(o => isFinishedMarked(o.sku_id)).map(o => o.sku_id)
       );
 
       const activeStatuses = ['이관준비', '이관중', '입고확인완료', '마킹중', '마킹완료'];
@@ -811,7 +812,7 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
             for (const line of woLines as any[]) {
               activeWoLines.push(line);
               // 기존 작업지시서의 마킹 완제품도 BOM 조회 대상에 추가
-              if (line.needs_marking && line.finished_sku_id.startsWith('26UN-') && line.finished_sku_id.includes('_')) {
+              if (line.needs_marking && isFinishedMarked(line.finished_sku_id)) {
                 allMarkingCandidates.add(line.finished_sku_id);
               }
             }
@@ -837,7 +838,7 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
         const skuId = line.finished_sku_id;
         const qty = line.ordered_qty || 0;
 
-        if (skuId.startsWith('26UN-') && skuId.includes('_')) {
+        if (isFinishedMarked(skuId)) {
           // 마킹 완제품 → 구성품별로 차감
           const bom = bomMap[skuId];
           if (bom) {
@@ -847,7 +848,7 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
           } else {
             // BOM 미등록 → 패턴 추정
             const baseSku = skuId.split('_')[0];
-            const mkSku = baseSku.replace('26UN-', '26MK-');
+            const mkSku = toMarkingSku(baseSku);
             invMap[baseSku] = (invMap[baseSku] || 0) - qty;
             invMap[mkSku] = (invMap[mkSku] || 0) - qty;
           }
@@ -874,7 +875,7 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
 
         // 구성품 목록 산출
         let components: { skuId: string; qty: number }[];
-        if (skuId.startsWith('26UN-') && skuId.includes('_')) {
+        if (isFinishedMarked(skuId)) {
           // 마킹 완제품 → BOM 전개
           const bom = bomMap[skuId];
           if (bom) {
@@ -882,7 +883,7 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
           } else {
             // BOM 미등록 → SKU 패턴으로 추정 (유니폼 + 마킹)
             const baseSku = skuId.split('_')[0];
-            const mkSku = baseSku.replace('26UN-', '26MK-');
+            const mkSku = toMarkingSku(baseSku);
             components = [{ skuId: baseSku, qty }, { skuId: mkSku, qty }];
           }
         } else {
@@ -909,7 +910,7 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
       for (const o of cannotShip) {
         const skuId = o.sku_id;
         const qty = o.quantity;
-        if (skuId.startsWith('26UN-') && skuId.includes('_')) {
+        if (isFinishedMarked(skuId)) {
           const bom = bomMap[skuId];
           if (bom) {
             for (const c of bom.components) {
@@ -918,7 +919,7 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
             }
           } else {
             const baseSku = skuId.split('_')[0];
-            const mkSku = baseSku.replace('26UN-', '26MK-');
+            const mkSku = toMarkingSku(baseSku);
             if (!shortageSkus[baseSku]) shortageSkus[baseSku] = { demand: 0, stock: invMap[baseSku] || 0 };
             shortageSkus[baseSku].demand += qty;
             if (!shortageSkus[mkSku]) shortageSkus[mkSku] = { demand: 0, stock: invMap[mkSku] || 0 };
@@ -955,11 +956,10 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
         }
         setMessage({ type: 'error', text: `전체 ${cannotShip.length}건 재고 부족 → 상태 변경 완료` });
         loadDashboard();
-        setCreatingWo(false);
         return;
       }
 
-      if (!window.confirm(confirmMsg)) { setCreatingWo(false); return; }
+      if (!window.confirm(confirmMsg)) return;
 
       const today = new Date().toISOString().split('T')[0];
 
@@ -1150,7 +1150,7 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
         if (!components) {
           // BOM 미등록 → 패턴 추정
           const baseSku = order.sku_id.split('_')[0];
-          const mkSku = baseSku.replace('26UN-', '26MK-');
+          const mkSku = toMarkingSku(baseSku);
           components = [
             { skuId: baseSku, skuName: baseSku, qty: 1 },
             { skuId: mkSku, skuName: mkSku, qty: 1 },

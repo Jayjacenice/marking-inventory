@@ -281,12 +281,14 @@ export function parseBerrizBomExcel(file: File, onProgress?: ProgressCallback): 
           return;
         }
 
-        // 헤더 자동 매핑
+        // 헤더 자동 매핑 — 공백 제거 후 부분 일치 (예: "SKU 코드", "SKU코드(필수)")
+        const normalize = (s: string) => s.replace(/\s+/g, '').toLowerCase();
         const header = (rows[0] || []).map((h: any) => String(h || '').trim());
+        const headerNorm = header.map(normalize);
         const findCol = (...candidates: string[]): number => {
-          for (const c of candidates) {
-            const idx = header.indexOf(c);
-            if (idx !== -1) return idx;
+          const cands = candidates.map(normalize);
+          for (let i = 0; i < headerNorm.length; i++) {
+            if (cands.some((c) => headerNorm[i] === c || headerNorm[i].includes(c))) return i;
           }
           return -1;
         };

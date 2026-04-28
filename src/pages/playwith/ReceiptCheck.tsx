@@ -11,6 +11,7 @@ import { generateTemplate, parseQtyExcel, buildMatchKey } from '../../lib/excelU
 import ComparisonPanel, { type ComparisonRow } from '../../components/ComparisonPanel';
 import type { AppUser } from '../../types';
 import { TwoColumnSkeleton } from '../../components/LoadingSkeleton';
+import { PREFIX, toMarkingSku } from '../../lib/skuPrefix';
 
 interface ReceiptItem {
   skuId: string;
@@ -506,9 +507,9 @@ export default function ReceiptCheck({ currentUser }: { currentUser: AppUser }) 
               thisWaveQty = Math.min(available, remaining);
               consumeMapMarking[base] = Math.max(0, (consumeMapMarking[base] || 0) - thisWaveQty);
               // 마킹 구성품도 차감
-              const mk = base.replace('26UN-', '26MK-');
+              const mk = toMarkingSku(base);
               consumeMapMarking[mk] = Math.max(0, (consumeMapMarking[mk] || 0) - thisWaveQty);
-            } else if (fsku.startsWith('26MK-')) {
+            } else if (fsku.startsWith(PREFIX.marking)) {
               // 마킹키트 단독 라인: finished_sku_id 자체가 구성품
               const available = consumeMapMarking[fsku] || 0;
               thisWaveQty = Math.min(available, remaining);

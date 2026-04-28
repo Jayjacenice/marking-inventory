@@ -7,6 +7,7 @@ import type { ProgressCallback } from '../../lib/workOrderRollback';
 import { useStaleGuard } from '../../hooks/useStaleGuard';
 import { useLoadingTimeout } from '../../hooks/useLoadingTimeout';
 import { generateTemplate, parseQtyExcel } from '../../lib/excelUtils';
+import { PREFIX } from '../../lib/skuPrefix';
 import ComparisonPanel, { type ComparisonRow } from '../../components/ComparisonPanel';
 import { TableSkeleton } from '../../components/LoadingSkeleton';
 import { notifySlack } from '../../lib/slackNotify';
@@ -220,7 +221,7 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
       if (isStale()) return;
 
       // 26MK- 로 시작하는 마킹키트 단품은 마킹 작업 대상이 아님
-      const lines = (rawLines || []).filter((l: any) => !l.finished_sku_id.startsWith('26MK-'));
+      const lines = (rawLines || []).filter((l: any) => !l.finished_sku_id.startsWith(PREFIX.marking));
 
       const lineIds = (lines as any[]).map((l: any) => l.id);
       setAllLineIds(lineIds);

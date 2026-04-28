@@ -89,6 +89,25 @@ npm run dev
 
 ---
 
+## 재고 매칭 정책 (변경 시 검토 필요)
+
+### CJ 가용재고 매칭 (OrderUpload — handleCreateWorkOrder)
+- 매칭 단위: 주문 finished SKU 와 동일한 CJ 재고 SKU **단 하나**.
+- **BOM 분해 금지**: 마킹 완제품 주문(예: `26UN-BS-HM-006_홍길동`)을 유니폼단품 + 마킹단품으로 분해해 CJ 재고와 매칭하지 않는다. CJ 는 완성품 보관 창고이며 마킹 라인이 없다.
+- **부분 충당 금지**: `CJ 재고 >= 주문 수량` 일 때만 충당. 예: 주문 10개 / CJ 7개 → 0개 충당, 전량 매장 출고로 분류.
+- **FIFO 기준**: `online_order.order_date` 오름차순. 동일 일자 내 tiebreaker 는 입력 순서(배열 안정 정렬).
+- **대상 status**: '신규' / '재고부족' 만. 'CJ대기' 재처리 금지.
+
+### 매장(오프라인샵) 출고
+- BOM 분해 후 단품 차감(`needs_marking=false` 단품 기준). 위 CJ 정책과 별개.
+
+### SKU prefix 검사 — `26MK-` vs `26MK2-`
+- 마킹 단품 prefix 는 `26MK-` 와 `26MK2-` 두 종류 존재.
+- 코드 대부분(`PREFIX.marking` 검사)은 **`26MK-` 만 매칭**. `26MK2-` 가 마킹 단품으로 분류·필터·전환 대상에 들어와야 하는지는 향후 정책 결정 필요(`src/lib/skuPrefix.ts` 의 `isMarkingKit` 사용으로 일괄 확장 가능).
+- 시즌 변경 시 `src/lib/skuPrefix.ts` 의 `SEASON = '26'` 한 줄만 수정하면 prefix 일괄 적용.
+
+---
+
 ## BOM 엑셀 양식
 
 헤더 포함, 아래 순서로 작성:

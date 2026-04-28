@@ -11,6 +11,7 @@ import ComparisonPanel, { type ComparisonRow } from '../../components/Comparison
 import { TwoColumnSkeleton } from '../../components/LoadingSkeleton';
 import { notifySlack } from '../../lib/slackNotify';
 import type { AppUser } from '../../types';
+import { isUniform, PREFIX } from '../../lib/skuPrefix';
 
 interface ShipmentItem {
   lineId: string;
@@ -195,7 +196,7 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
 
       // 유니폼 관련 SKU 판별 (오프라인 매장에서 발송 대상)
       const isUniformRelated = (skuId: string) =>
-        skuId?.startsWith('26UN-') || skuId?.startsWith('26MK-');
+        (skuId ? isUniform(skuId) || skuId.startsWith(PREFIX.marking) : false);
 
       // BOM 전개 후 잔량 계산 헬퍼 (유니폼만 + 재고 있는 것만 카운트)
       const enrichWo = (wo: any): ActiveWorkOrder => {
@@ -377,7 +378,7 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
         } else {
           // 비유니폼 단품 (악세서리 등)은 오프라인 발송 대상 아님 → skip
           const skuId = line.finished_sku_id as string;
-          if (!skuId?.startsWith('26UN-') && !skuId?.startsWith('26MK-')) continue;
+          if (!skuId || (!isUniform(skuId) && !skuId.startsWith(PREFIX.marking))) continue;
 
           const key = `${line.finished_sku_id}::d`;
           if (!componentMap[key]) {

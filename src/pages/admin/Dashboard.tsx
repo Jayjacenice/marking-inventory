@@ -6,6 +6,7 @@ import { supabaseAdmin } from '../../lib/supabaseAdmin';
 import { getWarehouseId } from '../../lib/warehouseStore';
 import { recordTransactionBatch, type RecordTxParams } from '../../lib/inventoryTransaction';
 import { cancelOnlineOrdersLIFO } from '../../lib/orderCancel';
+import { PREFIX, LIKE_PATTERN } from '../../lib/skuPrefix';
 import { Trash2, AlertTriangle, CheckCircle, XCircle, Eye, RotateCcw, Settings } from 'lucide-react';
 import { useReadOnly } from '../../contexts/ReadOnlyContext';
 import { CardSkeleton } from '../../components/LoadingSkeleton';
@@ -620,7 +621,7 @@ export default function Dashboard({ currentUser }: DashboardProps) {
       .eq('warehouse_id', pwWhId)
       .eq('needs_marking', true)
       .gt('quantity', 0)
-      .like('sku_id', '26MK-%');
+      .like('sku_id', LIKE_PATTERN.marking);
 
     if (!residuals || residuals.length === 0) return { transitioned: [] };
 
@@ -656,7 +657,7 @@ export default function Dashboard({ currentUser }: DashboardProps) {
           .select('finished_sku_id, component_sku_id, quantity')
           .in('finished_sku_id', finishedSkuIds);
         for (const b of (bomRows || []) as any[]) {
-          if (!b.component_sku_id?.startsWith('26MK-')) continue;
+          if (!b.component_sku_id?.startsWith(PREFIX.marking)) continue;
           const pending = unmarkedByFinished[b.finished_sku_id] || 0;
           reservedBySku[b.component_sku_id] =
             (reservedBySku[b.component_sku_id] || 0) + pending * (b.quantity || 0);

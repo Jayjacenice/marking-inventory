@@ -10,6 +10,7 @@ import type { TxType } from '../../types';
 import * as XLSX from 'xlsx';
 import { Upload, Download, Search, AlertTriangle, Store } from 'lucide-react';
 import { useReadOnly } from '../../contexts/ReadOnlyContext';
+import { isUniform, PREFIX } from '../../lib/skuPrefix';
 
 interface LedgerRow {
   warehouseName: string;
@@ -125,7 +126,7 @@ export default function StockLedger() {
       const makeKey = (whId: string, skuId: string) => {
         const info = skuLookup[skuId];
         // 마킹 완성품: SKU에 _ 접미사가 있고 26UN- 또는 26MK-로 시작
-        const isMarkedProduct = skuId.includes('_') && (skuId.startsWith('26UN-') || skuId.startsWith('26MK-'));
+        const isMarkedProduct = skuId.includes('_') && (isUniform(skuId) || skuId.startsWith(PREFIX.marking));
         const groupId = isMarkedProduct ? skuId : (info?.baseBarcode || skuId);
         return `${whId}|${groupId}`;
       };
